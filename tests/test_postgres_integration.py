@@ -8,10 +8,10 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, event, func, select
 
 from app.auth import Principal, current_principal, token_hash
-from app.db import SessionFactory
+from app.db import SessionFactory, engine
 from app.evidence import put_blob
 from app.models import (
     AuthSession,
@@ -817,4 +817,96 @@ async def test_pull_resume_cursor_consumes_invisible_rows_without_skipping_overs
         exhausted = await pull_since(db, actor, second_page.cursor)
         assert exhausted.records == []
         assert exhausted.cursor == f"seq:{second_sequence}"
+        await clear_database(db)
+
+
+@pytest.mark.asyncio
+async def test_pull_500_invisible_item_children_stays_within_fixed_query_budget():
+    actor = principal(
+        capabilities={"sync"},
+        customer_ids={"customer-1"},
+        project_ids=set(),
+    )
+    now = datetime.now(timezone.utc)
+
+    async with SessionFactory() as db:
+        await clear_database(db)
+        db.add(Organization(id="org-1", name="Vitrial", authorization_revision=1))
+        await db.flush()
+        db.add(CanonicalCustomer(organization_id="org-1", customer_id="customer-1"))
+        await db.flush()
+        db.add(CanonicalProject(
+            organization_id="org-1",
+            project_id="project-hidden",
+            customer_id="customer-1",
+        ))
+        await db.flush()
+        db.add(CanonicalProjectSector(
+            organization_id="org-1",
+            project_sector_id="sector-hidden",
+            project_id="project-hidden",
+            sector_id="sector-aluminum-glass-steel",
+        ))
+        await db.flush()
+
+        items = [
+            CanonicalItem(
+                organization_id="org-1",
+                item_id=f"item-hidden-{index}",
+                project_id="project-hidden",
+                project_sector_id="sector-hidden",
+            )
+            for index in range(500)
+        ]
+        db.add_all(items)
+        await db.flush()
+
+        children = [
+            CanonicalItemChild(
+                organization_id="org-1",
+                entity_type="measurement",
+                entity_id=f"measurement-hidden-{index}",
+                item_id=f"item-hidden-{index}",
+            )
+            for index in range(500)
+        ]
+        db.add_all(children)
+        await db.flush()
+
+        changes = [
+            SyncChangeLog(
+                organization_id="org-1",
+                entity_type="measurement",
+                entity_id=f"measurement-hidden-{index}",
+                server_revision=index + 1,
+                client_mutation_id=f"mutation-hidden-{index}",
+                operation="upsert",
+            )
+            for index in range(500)
+        ]
+        db.add_all(changes)
+        await db.flush()
+        last_sequence = max(int(change.sequence) for change in changes)
+        await db.commit()
+
+    select_statements: list[str] = []
+
+    def count_selects(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            select_statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", count_selects)
+    try:
+        async with SessionFactory() as db:
+            page = await pull_since(db, actor, "seq:0")
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", count_selects)
+
+    assert page.records == []
+    assert page.cursor == f"seq:{last_sequence}"
+    assert len(select_statements) <= 8, (
+        f"bounded pull visibility regressed to {len(select_statements)} SELECTs"
+    )
+
+    async with SessionFactory() as db:
         await clear_database(db)
