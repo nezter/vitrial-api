@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import Principal
+from app.delivery_installation import DeliveryInstallationRejected, validate_installation_handoff
 from app.delivery_production import DeliveryProductionRejected, validate_production_handoff
 from app.models import CanonicalProject, CanonicalProjectChild, SyncEntity
 from app.ownership import EffectiveScope
@@ -575,11 +576,15 @@ def validate_delivery_execution_payload(
         is_materials_revision = state == "materialsRequired" and to_status == "materialsRequired"
         is_procurement_revision = state == "procurement" and to_status == "procurement"
         is_production_revision = state == "production" and to_status == "production"
+        is_installation_revision = (
+            state in {"readyForInstallation", "scheduled"} and to_status == state
+        )
         if (
             to_status != expected
             and not is_materials_revision
             and not is_procurement_revision
             and not is_production_revision
+            and not is_installation_revision
         ):
             raise DeliveryExecutionRejected("delivery execution transition is invalid")
         state = to_status
@@ -602,7 +607,8 @@ def validate_delivery_execution_payload(
     _validate_procurement_handoff(payload, current_payload, principal, status=status)
     try:
         validate_production_handoff(payload, current_payload, principal, status=status)
-    except DeliveryProductionRejected as exc:
+        validate_installation_handoff(payload, current_payload, principal, status=status)
+    except (DeliveryProductionRejected, DeliveryInstallationRejected) as exc:
         raise DeliveryExecutionRejected(str(exc)) from exc
 
     if current_payload is None:
@@ -627,7 +633,14 @@ def validate_delivery_execution_payload(
 
     appended = events[len(current_events) :]
     if not appended:
-        protected = {"status", "updatedAt", "materialsPlan", "procurementPlan", "productionPlan"}
+        protected = {
+            "status",
+            "updatedAt",
+            "materialsPlan",
+            "procurementPlan",
+            "productionPlan",
+            "installationSchedule",
+        }
         if any(current_payload.get(key) != payload.get(key) for key in protected):
             raise DeliveryExecutionRejected(
                 "delivery execution operational changes must append a lifecycle event"
@@ -661,6 +674,14 @@ def validate_delivery_execution_payload(
     ):
         raise DeliveryExecutionRejected(
             "Production self-transition requires a production plan revision"
+        )
+    if (
+        newest.get("fromStatus") in {"readyForInstallation", "scheduled"}
+        and newest.get("toStatus") == newest.get("fromStatus")
+        and current_payload.get("installationSchedule") == payload.get("installationSchedule")
+    ):
+        raise DeliveryExecutionRejected(
+            "Installation schedule self-transition requires an installation schedule revision"
         )
     _require_event_provenance(newest, principal, current_actor=True)
 
