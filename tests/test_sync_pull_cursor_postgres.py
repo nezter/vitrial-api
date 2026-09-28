@@ -27,7 +27,7 @@ import pytest
 
 from app.auth import Principal
 from app.db import SessionFactory
-from app.models import Organization, SyncChangeLog, SyncEntity, User
+from app.models import CanonicalCustomer, Organization, SyncChangeLog, SyncEntity, User
 from app.schemas import SyncBatch, SyncRecord
 from app.sync_service import MAX_SYNC_PULL_SCAN_CHANGES, apply_push, pull_since
 
@@ -58,6 +58,13 @@ def record(record_id: str, entity_id: str, payload: dict, mutation_id: str) -> d
     }
 
 
+# Every customer this test creates must be inside the principal's scope.
+# record_is_visible() checks CanonicalCustomer *and* the effective scope, so a
+# pushed record with no canonical row -- or one outside customer_ids -- is
+# correctly filtered out and the page comes back empty.
+CUSTOMER_IDS = frozenset(f"customer-{i:04d}" for i in range(600))
+
+
 def actor() -> Principal:
     return Principal(
         user_id="user-1",
@@ -66,7 +73,7 @@ def actor() -> Principal:
         session_id="session-1",
         authorization_revision=1,
         capabilities=frozenset({"sync", "customer.create", "customer.edit"}),
-        customer_ids=frozenset(),
+        customer_ids=CUSTOMER_IDS,
         project_ids=frozenset(),
         all_customers=False,
         all_projects=False,
@@ -74,7 +81,7 @@ def actor() -> Principal:
 
 
 async def clear(db) -> None:
-    from sqlalchemy import delete
+    from sqlalchemy import delete, text
 
     await db.execute(delete(SyncChangeLog))
     await db.execute(delete(SyncEntity))
@@ -90,8 +97,14 @@ async def seed_org(db) -> None:
 
 
 async def push_customers(db, count: int, *, payload_bytes: int = 8) -> None:
-    """Create `count` customers, each carrying a payload of roughly `payload_bytes`."""
+    """Create `count` customers, each carrying a payload of roughly `payload_bytes`.
+
+    Also inserts the CanonicalCustomer row each one needs. Without it the record
+    is invisible: record_is_visible() requires both the canonical row and scope.
+    """
     for i in range(count):
+        db.add(CanonicalCustomer(organization_id="org-1", customer_id=f"customer-{i:04d}"))
+        await db.flush()
         batch = SyncBatch.model_validate({
             "deviceID": "device-1",
             "records": [
@@ -131,7 +144,7 @@ async def test_cursor_advances_when_the_page_is_fully_consumed():
 
 
 @pytest.mark.asyncio
-async def test_cursor_stops_before_a_deliverable_record_that_does_not_fit():
+async def test_cursor_stops_before_a_deliverable_record_that_does_not_fit(monkeypatch):
     """The regression this change fixes.
 
     Shrink the response ceiling so the page fills early. The change that does not
@@ -145,28 +158,33 @@ async def test_cursor_stops_before_a_deliverable_record_that_does_not_fit():
         await seed_org(db)
         await push_customers(db, 6, payload_bytes=4_000)
 
-        real = sync_service.MAX_SYNC_PULL_RESPONSE_BYTES
-        # Small enough that only a couple of records fit.
-        sync_service.MAX_SYNC_PULL_RESPONSE_BYTES = 12_000
-        try:
-            first = await pull_since(db, actor(), "seq:0")
-            assert 0 < len(first.records) < 6, "expected a partial page"
+        # Small enough that only a couple of the 4 KB records fit per page.
+        # monkeypatch restores the constant even if an assertion fails, which a
+        # try/finally in the test body does not guarantee on collection errors.
+        monkeypatch.setattr(sync_service, "MAX_SYNC_PULL_RESPONSE_BYTES", 12_000)
 
-            # The cursor must sit below the highest delivered sequence only if a
-            # deliverable record was left behind; there is one, so there is more.
-            second = await pull_since(db, actor(), first.cursor)
-            assert len(second.records) > 0, "the unfitted record must be re-delivered"
+        first = await pull_since(db, actor(), "seq:0")
+        assert 0 < len(first.records) < 6, "expected a partial page"
 
-            # No record is lost or duplicated across the two pages.
-            first_ids = {r.entityID for r in first.records}
-            second_ids = {r.entityID for r in second.records}
-            assert not (first_ids & second_ids), "a record was delivered twice"
-            assert len(first_ids) + len(second_ids) == 6
+        # Drain the rest, one bounded page at a time, and prove the union is
+        # exactly the six records with no loss and no duplication. A cursor that
+        # skipped an unfitted record would show up as a shortfall here.
+        seen: list[str] = []
+        cursors: list[int] = []
+        cursor = first.cursor
+        page = first
+        while page.records:
+            seen.extend(r.entityID for r in page.records)
+            cursors.append(cursor_of(page))
+            cursor = page.cursor
+            page = await pull_since(db, actor(), cursor)
+            if len(cursors) > 20:
+                raise AssertionError("pages did not converge; cursor is not advancing")
 
-            # And the pages advance monotonically.
-            assert cursor_of(second) > cursor_of(first)
-        finally:
-            sync_service.MAX_SYNC_PULL_RESPONSE_BYTES = real
+        assert len(seen) == 6, f"expected all 6 records, saw {len(seen)}: {seen}"
+        assert len(set(seen)) == 6, f"a record was delivered twice: {seen}"
+        assert cursors == sorted(cursors), f"cursor went backwards: {cursors}"
+        assert len(set(cursors)) == len(cursors), f"cursor stalled: {cursors}"
 
 
 @pytest.mark.asyncio
@@ -214,7 +232,9 @@ async def test_scan_ceiling_bounds_the_query():
     async with SessionFactory() as db:
         await clear(db)
         await seed_org(db)
-        # Insert directly: cheaper than driving apply_push for 600 customers.
+        # Inserted directly, and deliberately with NO CanonicalCustomer rows:
+        # every change is therefore undeliverable but still consumable, which is
+        # what proves the scan ceiling bounds the query rather than the page.
         for i in range(MAX_SYNC_PULL_SCAN_CHANGES + 25):
             db.add(SyncChangeLog(
                 organization_id="org-1",
@@ -226,6 +246,15 @@ async def test_scan_ceiling_bounds_the_query():
                 client_mutation_id=f"mutation-{i:04d}",
                 created_at=datetime(2026, 9, 6, 14, 0, tzinfo=timezone.utc),
             ))
+        await db.commit()
+        # Explicit sequence values on a BIGSERIAL primary key leave the
+        # sequence counter behind, so a later apply_push in this database would
+        # collide. Advance it past everything inserted.
+        await db.execute(
+            text("SELECT setval(pg_get_serial_sequence('sync_change_log', 'sequence'), "
+                 ":last, true)"),
+            {"last": MAX_SYNC_PULL_SCAN_CHANGES + 25},
+        )
         await db.commit()
 
         pulled = await pull_since(db, actor(), "seq:0")
