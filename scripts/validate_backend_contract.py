@@ -17,13 +17,13 @@ CAPABILITIES = {
     "item.blockers.manage", "item.measurements.manage", "item.evidence.manage",
     "item.requirements.manage", "item.configuration.manage", "item.configuration.finalize",
     "item.configuration.reopen", "quotation.create", "quotation.send", "quotation.approve",
-    "catalog.manage", "pricing.manage", "organization.members.manage",
+    "delivery.manage", "catalog.manage", "pricing.manage", "organization.members.manage",
     "organization.roles.manage", "sync",
 }
 ENTITY_TYPES = {
     "customer", "project", "project_sector", "item", "item_audit_event", "measurement",
     "evidence", "customer_requirement", "configuration", "configuration_version", "blocker",
-    "quotation",
+    "quotation", "delivery_execution",
 }
 REQUIRED_PATHS = {
     "/health", "/api/v1/version", "/api/v1/auth/me", "/api/v1/sync/push",

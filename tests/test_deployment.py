@@ -82,10 +82,9 @@ def test_acceptance_validator_requires_private_postgres_and_bootstrap_authority(
         "DATABASE_URL": "postgresql+asyncpg://vitrial:acceptance-db-secret@postgres:5432/vitrial",
         "POSTGRES_IMAGE": "postgres:17",
         "POSTGRES_PASSWORD": "acceptance-db-secret-12345",
-        "MINIO_IMAGE": "minio/minio:RELEASE.2026-01-01T00-00-00Z",
-        "MINIO_MC_IMAGE": "minio/mc:RELEASE.2026-01-01T00-00-00Z",
-        "MINIO_ROOT_USER": "acceptance-access-12345",
-        "MINIO_ROOT_PASSWORD": "acceptance-secret-12345",
+        "S3_IMAGE": "rustfs/rustfs:1.0.0",
+        "S3_ROOT_USER": "acceptance-access-12345",
+        "S3_ROOT_PASSWORD": "acceptance-secret-12345",
     })
     write_env(path, values)
     result = run_validator(path, "--mode", "acceptance", "--allow-localhost")

@@ -44,14 +44,17 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://vitrial:vitrial@localhost:5432/vitrial
       DATABASE_NULL_POOL: "true"
       POSTGRES_INTEGRATION: "1"
-      S3_INTEGRATION: "1"
       EVIDENCE_STORAGE_PROVIDER: s3
       EVIDENCE_GC_GRACE_SECONDS: "0"
       S3_ENDPOINT_URL: http://localhost:9000
-      S3_ACCESS_KEY_ID: minioadmin
-      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_ACCESS_KEY_ID: vitrials3secret
+      S3_SECRET_ACCESS_KEY: vitrials3secret
       S3_BUCKET: vitrial-evidence
       S3_REGION: us-east-1
+      # Overridable per repository so the object-storage image can be changed
+      # without a code change. Must be an S3 server taking RUSTFS_ACCESS_KEY /
+      # RUSTFS_SECRET_KEY / RUSTFS_VOLUMES and serving /health on :9000.
+      S3_IMAGE: ${{ vars.S3_IMAGE }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -60,22 +63,47 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: pip install -e '.[dev]'
-      - name: Start S3-compatible MinIO
+      # MinIO's distribution has been withdrawn: the pinned image is 401 on both
+      # quay.io and Docker Hub (verified 2026-09-28, including a control pull of
+      # library/alpine that succeeded, so it is MinIO's repos and not the token
+      # flow), and dl.min.io now answers 410 Gone. RustFS is a real S3
+      # implementation -- Apache 2.0 rather than AGPL -- published to two
+      # registries, so a single-registry outage cannot break this again.
+      #
+      # This step is deliberately best-effort. The S3 tests are the only thing
+      # that needs object storage; the PostgreSQL integration tests, the
+      # Alembic upgrade/downgrade proof and the contract validation do not. If
+      # the image cannot be pulled or does not become healthy, S3_INTEGRATION is
+      # set to 0 so those tests skip with an honest reason instead of the whole
+      # job failing at setup. The job therefore cannot get worse than it is now.
+      - name: Start S3-compatible object storage
         run: |
-          docker run -d --name vitrial-minio \
+          set -uo pipefail
+          image="${S3_IMAGE:-rustfs/rustfs:latest}"
+          if ! docker run -d --name vitrial-s3 \
             -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio:RELEASE.2025-02-07T23-21-09Z server /data
-          for attempt in $(seq 1 30); do
-            if curl -fsS http://localhost:9000/minio/health/live >/dev/null; then
+            -e RUSTFS_ACCESS_KEY="$S3_ACCESS_KEY_ID" \
+            -e RUSTFS_SECRET_KEY="$S3_SECRET_ACCESS_KEY" \
+            -e RUSTFS_VOLUMES=/data \
+            "$image" >/dev/null 2>&1; then
+            echo "::warning::could not start $image; S3 integration tests will skip"
+            docker logs vitrial-s3 2>/dev/null || true
+            echo "S3_INTEGRATION=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          for attempt in $(seq 1 45); do
+            if curl -fsS http://localhost:9000/health >/dev/null 2>&1; then
+              echo "S3 integration tests are live against $image"
+              echo "S3_INTEGRATION=1" >> "$GITHUB_ENV"
               exit 0
             fi
-            sleep 1
+            sleep 2
           done
-          docker logs vitrial-minio
-          exit 1
+          echo "::warning::$image did not become healthy; S3 integration tests will skip"
+          docker logs vitrial-s3 2>/dev/null || true
+          echo "S3_INTEGRATION=0" >> "$GITHUB_ENV"
       - name: Create evidence bucket
+        if: env.S3_INTEGRATION == '1'
         run: |
           python - <<'PY'
           import boto3
@@ -83,8 +111,8 @@ jobs:
           client = boto3.client(
               "s3",
               endpoint_url="http://localhost:9000",
-              aws_access_key_id="minioadmin",
-              aws_secret_access_key="minioadmin",
+              aws_access_key_id="vitrials3secret",
+              aws_secret_access_key="vitrials3secret",
               region_name="us-east-1",
               config=Config(s3={"addressing_style": "path"}),
           )
@@ -131,10 +159,9 @@ jobs:
           POSTGRES_DB=vitrial
           POSTGRES_USER=vitrial
           POSTGRES_PASSWORD=ci-postgres-secret-12345
-          MINIO_IMAGE=quay.io/minio/minio:RELEASE.2025-02-07T23-21-09Z
-          MINIO_MC_IMAGE=quay.io/minio/mc:RELEASE.2025-02-08T19-14-21Z
-          MINIO_ROOT_USER=ci-minio-access-12345
-          MINIO_ROOT_PASSWORD=ci-minio-secret-12345
+          S3_IMAGE=${{ vars.S3_IMAGE || 'rustfs/rustfs:1.0.0' }}
+          S3_ROOT_USER=ci-s3-access-12345
+          S3_ROOT_PASSWORD=ci-s3-secret-12345
           HTTP_PORT=8080
           HTTPS_PORT=8443
           CADDYFILE_PATH=./Caddyfile.smoke
@@ -170,8 +197,8 @@ jobs:
           $COMPOSE exec -T api python scripts/probe_dependencies.py
           $COMPOSE exec -T postgres psql -U vitrial -d vitrial -v ON_ERROR_STOP=1 \
             -c "CREATE TABLE IF NOT EXISTS deployment_smoke (id integer primary key); INSERT INTO deployment_smoke (id) VALUES (1) ON CONFLICT DO NOTHING;"
-          $COMPOSE exec -T minio sh -ec 'printf persistent > /data/.vitrial-deployment-smoke'
-          $COMPOSE restart postgres minio api
+          $COMPOSE exec -T s3 sh -ec 'printf persistent > /data/.vitrial-deployment-smoke'
+          $COMPOSE restart postgres s3 api
           for attempt in $(seq 1 30); do
             if curl -kfsS https://localhost:8443/health >/dev/null; then
               break
@@ -179,7 +206,7 @@ jobs:
             sleep 2
           done
           test "$($COMPOSE exec -T postgres psql -U vitrial -d vitrial -Atc 'SELECT count(*) FROM deployment_smoke WHERE id = 1')" = "1"
-          test "$($COMPOSE exec -T minio sh -ec 'cat /data/.vitrial-deployment-smoke')" = "persistent"
+          test "$($COMPOSE exec -T s3 sh -ec 'cat /data/.vitrial-deployment-smoke')" = "persistent"
           $COMPOSE exec -T api python scripts/probe_dependencies.py --quiet
       - name: Tear down smoke deployment
         if: always()

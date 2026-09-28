@@ -52,7 +52,8 @@ Rollback intentionally **does not automatically downgrade the database**. Databa
 
 ## Single-host acceptance topology
 
-`compose.acceptance.yml` exists to unblock physical two-user/two-device acceptance. It adds PostgreSQL and MinIO on private Docker networking with named persistent volumes. Neither data service publishes a host port. Caddy remains the only public edge.
+`compose.acceptance.yml` exists to unblock physical two-user/two-device acceptance. It adds PostgreSQL and S3-compatible object storage (RustFS) on private Docker
+networking with named persistent volumes. Neither data service publishes a host port. Caddy remains the only public edge.
 
 This topology is suitable for an acceptance environment or temporary staging host. It is not equivalent to managed production persistence because database/object data share the fate of one machine.
 

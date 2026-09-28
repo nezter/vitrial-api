@@ -10,13 +10,13 @@ Capability = Literal[
     "item.requirements.manage", "item.configuration.manage",
     "item.configuration.finalize", "item.configuration.reopen",
     "quotation.create", "quotation.send", "quotation.approve",
-    "catalog.manage", "pricing.manage", "organization.members.manage",
-    "organization.roles.manage", "sync",
+    "delivery.manage", "catalog.manage", "pricing.manage",
+    "organization.members.manage", "organization.roles.manage", "sync",
 ]
 EntityType = Literal[
     "customer", "project", "project_sector", "item", "item_audit_event",
     "measurement", "evidence", "customer_requirement", "configuration",
-    "configuration_version", "blocker", "quotation",
+    "configuration_version", "blocker", "quotation", "delivery_execution",
 ]
 
 class StrictModel(BaseModel):

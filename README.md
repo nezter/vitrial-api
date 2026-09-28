@@ -82,7 +82,7 @@ The runtime image executes as an unprivileged UID/GID, runs with a writable evid
 Deployment assets live in `deploy/`:
 
 - `compose.production.yml` — API + Alembic migration job + Caddy; expects external persistent PostgreSQL and S3-compatible object storage.
-- `compose.acceptance.yml` — single-host physical-device environment with isolated persistent PostgreSQL + MinIO volumes.
+- `compose.acceptance.yml` — single-host physical-device environment with isolated persistent PostgreSQL + S3 object storage volumes.
 - `Caddyfile` — public automatic HTTPS edge.
 - `Caddyfile.smoke` — localhost internal-CA TLS for CI only.
 - `env.production.example` — non-secret configuration template.

@@ -18,6 +18,49 @@ _QUOTATION_STATUSES = {"draft", "ready", "sent", "approved", "rejected", "supers
 _QUOTATION_CONTENT_LOCKED = {"sent", "rejected", "approved", "superseded"}
 _QUOTATION_LIFECYCLE_KEYS = {"status", "events", "updatedAt"}
 
+# Delivery execution is a strictly ordered pipeline that hangs off an approved
+# quotation. The client (DeliveryExecution.allowedTransitions) is the source of
+# truth for this graph; it is reproduced here so the server rejects a batch that
+# claims a transition the client itself would refuse to make. Self-transitions
+# are present in the client graph and mean "this state may be re-entered with a
+# new event" (a note-only update), so they are legal here too.
+_DELIVERY_STATUSES = {
+    "engineeringReview",
+    "materialsRequired",
+    "procurement",
+    "production",
+    "readyForInstallation",
+    "scheduled",
+    "installed",
+    "complete",
+}
+_DELIVERY_INITIAL_STATUS = "engineeringReview"
+_DELIVERY_TRANSITIONS: dict[str, tuple[str, ...]] = {
+    "engineeringReview": ("materialsRequired",),
+    "materialsRequired": ("materialsRequired", "procurement"),
+    "procurement": ("procurement", "production"),
+    "production": ("production", "readyForInstallation"),
+    "readyForInstallation": ("readyForInstallation", "scheduled"),
+    "scheduled": ("scheduled", "installed"),
+    "installed": ("installed", "complete"),
+    "complete": (),
+}
+# A delivery execution is bound to the quotation it was raised against for its
+# whole life. Re-pointing it at another quotation or another revision of the
+# same quotation would silently restate what the customer agreed to buy, so
+# these are immutable after creation — matching the client's own
+# commercial-handoff tampering guard.
+_DELIVERY_IMMUTABLE_KEYS = (
+    "quotationID",
+    "quotationRevision",
+    "quotationNumber",
+    "projectID",
+    "customerID",
+    "currencyCode",
+    "quotedTotal",
+    "startedAt",
+)
+
 
 def _normalized(value: object) -> str | None:
     if not isinstance(value, str):
@@ -322,6 +365,82 @@ async def validate_quotation_lifecycle(
                 raise LifecycleRejected("quotation predecessor revision is not contiguous")
 
 
+def _delivery_no_event_closure(states: set[str]) -> set[str]:
+    # A status may be re-entered without changing the state graph only via a
+    # self-transition, so the closure of a set is itself. Kept as a function so
+    # the reachability check reads the same way as the quotation validator's.
+    return set(states)
+
+
+def _delivery_status_for_event(
+    event: dict, *, reachable: set[str]
+) -> str:
+    from_status = _normalized(event.get("fromStatus"))
+    to_status = _normalized(event.get("toStatus"))
+    if to_status is None or to_status not in _DELIVERY_STATUSES:
+        raise LifecycleRejected("delivery execution event toStatus is invalid")
+    if from_status is None:
+        # The opening event declares no predecessor. The client builds it with
+        # fromStatus nil and toStatus set to the initial status, so it opens the
+        # pipeline rather than traversing an edge — and allowedTransitions has no
+        # self-edge into engineeringReview to check it against. It is therefore
+        # legal only as the very first event.
+        if reachable != {_DELIVERY_INITIAL_STATUS}:
+            raise LifecycleRejected("delivery execution creation event is not at the start")
+        if to_status != _DELIVERY_INITIAL_STATUS:
+            raise LifecycleRejected(
+                "delivery execution must open at the initial status"
+            )
+        return to_status
+    if from_status not in _DELIVERY_STATUSES:
+        raise LifecycleRejected("delivery execution event fromStatus is invalid")
+    if from_status not in reachable:
+        raise LifecycleRejected("delivery execution event fromStatus is not reachable")
+    if to_status not in _DELIVERY_TRANSITIONS[from_status]:
+        raise LifecycleRejected("delivery execution transition is not permitted")
+    return to_status
+
+
+async def validate_delivery_execution_lifecycle(
+    db: AsyncSession,
+    payload: dict,
+    current_payload: dict | None,
+    principal: Principal,
+    *,
+    entity_id: str,
+) -> None:
+    status = payload.get("status")
+    if status not in _DELIVERY_STATUSES:
+        raise LifecycleRejected("delivery execution status is invalid")
+
+    events = _events(payload, name="delivery execution")
+    _require_unique_event_ids(events, name="delivery execution")
+    for event in events:
+        _require_connected_provenance(event, principal, name="delivery execution")
+
+    appended = _require_immutable_prefix(current_payload, events, name="delivery execution")
+    reachable = {_DELIVERY_INITIAL_STATUS}
+    for event in events:
+        reachable = {_delivery_status_for_event(event, reachable=reachable)}
+
+    if status not in _delivery_no_event_closure(reachable):
+        raise LifecycleRejected(
+            "delivery execution status is not reachable from lifecycle history"
+        )
+
+    if appended:
+        _require_connected_provenance(
+            appended[-1], principal, name="delivery execution", current_actor=True
+        )
+
+    if current_payload is not None:
+        for key in _DELIVERY_IMMUTABLE_KEYS:
+            if current_payload.get(key) != payload.get(key):
+                raise LifecycleRejected(
+                    f"delivery execution {key} is immutable"
+                )
+
+
 async def validate_lifecycle_mutation(
     db: AsyncSession,
     principal: Principal,
@@ -347,5 +466,9 @@ async def validate_lifecycle_mutation(
         )
     elif entity_type == "quotation":
         await validate_quotation_lifecycle(
+            db, payload, current_payload, principal, entity_id=entity_id
+        )
+    elif entity_type == "delivery_execution":
+        await validate_delivery_execution_lifecycle(
             db, payload, current_payload, principal, entity_id=entity_id
         )

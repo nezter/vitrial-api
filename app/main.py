@@ -185,13 +185,15 @@ async def evidence_head(
     operation_id="evidenceUpload",
     status_code=201,
     openapi_extra={
+        # The body is a raw byte stream (request.stream()), not a base64
+        # string. Declaring `contentEncoding: binary` would tell a code
+        # generator to base64-encode the payload before sending, and the server
+        # would then store that base64 text as if it were the file. An empty
+        # schema models the raw octet-stream body directly, which is also what
+        # the client's contract validator requires.
         "requestBody": {
             "required": True,
-            "content": {
-                "application/octet-stream": {
-                    "schema": {"type": "string", "contentEncoding": "binary"}
-                }
-            },
+            "content": {"application/octet-stream": {}},
         }
     },
 )
@@ -223,6 +225,21 @@ async def evidence_put(
 @app.get(
     "/api/v1/sync/evidence-blobs/{documentID}",
     operation_id="evidenceDownload",
+    response_class=StreamingResponse,
+    openapi_extra={
+        # Without response_class above, FastAPI documents the 200 as
+        # application/json — it defaults to JSONResponse and the handler
+        # declares no response_model — and merging would leave that bogus entry
+        # beside the real one, so a generated client could parse a blob as JSON.
+        # The handler streams the stored bytes back under the blob's own media
+        # type, so an empty octet-stream schema is the honest description.
+        "responses": {
+            "200": {
+                "description": "The stored evidence blob as a raw byte stream.",
+                "content": {"application/octet-stream": {}},
+            }
+        },
+    },
 )
 async def evidence_get(
     documentID: DocumentID,

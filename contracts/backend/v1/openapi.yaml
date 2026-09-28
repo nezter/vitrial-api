@@ -131,10 +131,7 @@ paths:
       requestBody:
         required: true
         content:
-          application/octet-stream:
-            schema:
-              type: string
-              contentEncoding: binary
+          application/octet-stream: {}
       responses:
         '200':
           description: Evidence blob stored and digest verified.
@@ -160,10 +157,7 @@ paths:
                 type: string
                 pattern: '^[0-9a-fA-F]{64}$'
           content:
-            application/octet-stream:
-              schema:
-                type: string
-                contentEncoding: binary
+            application/octet-stream: {}
         '401':
           description: Authentication required.
         '403':
@@ -209,7 +203,12 @@ components:
           minLength: 1
     ProjectCapability:
       type: string
-      enum:
+      minLength: 1
+      description: >-
+        Explicit capability identifier. The values below are the capabilities known
+        to this client version, not a closed wire enum. Older clients ignore unknown
+        future capability identifiers and never infer authority from role names.
+      examples:
         - customer.create
         - customer.edit
         - project.create
@@ -228,6 +227,7 @@ components:
         - quotation.create
         - quotation.send
         - quotation.approve
+        - delivery.manage
         - catalog.manage
         - pricing.manage
         - organization.members.manage
@@ -317,6 +317,7 @@ components:
         - configuration_version
         - blocker
         - quotation
+        - delivery_execution
     SyncRecord:
       type: object
       additionalProperties: false

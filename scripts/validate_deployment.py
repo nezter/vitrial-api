@@ -94,7 +94,7 @@ def validate(args: argparse.Namespace) -> tuple[list[str], dict[str, object]]:
         parsed = urlparse(endpoint)
         if parsed.scheme != "https" and not args.allow_insecure_s3:
             errors.append("production S3_ENDPOINT_URL must use https://")
-        if parsed.hostname in {"localhost", "127.0.0.1", "minio"}:
+        if parsed.hostname in {"localhost", "127.0.0.1", "minio", "s3"}:
             errors.append("production S3 endpoint must be external persistent object storage")
     if endpoint and looks_placeholder(endpoint):
         errors.append("S3_ENDPOINT_URL still contains a placeholder")
@@ -110,11 +110,11 @@ def validate(args: argparse.Namespace) -> tuple[list[str], dict[str, object]]:
         errors.append("ADMIN_API_KEY_HASH must be a 64-character SHA-256 hex digest")
 
     if args.mode == "acceptance":
-        for key in ("POSTGRES_IMAGE", "MINIO_IMAGE", "MINIO_MC_IMAGE"):
+        for key in ("POSTGRES_IMAGE", "S3_IMAGE"):
             image = require(values, key, errors)
             if image.endswith(":latest") and not args.allow_mutable_images:
                 errors.append(f"{key} must not use :latest")
-        for key in ("POSTGRES_PASSWORD", "MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD"):
+        for key in ("POSTGRES_PASSWORD", "S3_ROOT_USER", "S3_ROOT_PASSWORD"):
             secret = require(values, key, errors)
             if secret and (len(secret) < 16 or looks_placeholder(secret)):
                 errors.append(f"{key} must be a non-default random value of at least 16 characters")
