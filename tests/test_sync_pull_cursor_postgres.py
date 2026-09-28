@@ -27,6 +27,7 @@ from sqlalchemy import text
 from app.auth import Principal
 from app.db import SessionFactory
 from app.models import CanonicalCustomer, Organization, SyncChangeLog, SyncEntity, User
+from app.schemas import SyncBatch
 from app.sync_service import MAX_SYNC_PULL_SCAN_CHANGES, pull_since
 
 pytestmark = pytest.mark.skipif(
@@ -34,7 +35,11 @@ pytestmark = pytest.mark.skipif(
     reason="requires migrated PostgreSQL integration database",
 )
 
-NOW = "2026-09-06T14:00:00Z"
+# Every customer these tests seed must be inside the principal's scope.
+# record_is_visible() checks the CanonicalCustomer row AND the effective scope
+# (`all_customers or customer_id in customer_ids`), so a customer outside this
+# set is correctly filtered out and the page comes back empty.
+CUSTOMER_IDS = frozenset(f"customer-{i:04d}" for i in range(600))
 
 
 def actor() -> Principal:
