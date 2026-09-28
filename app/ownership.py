@@ -72,6 +72,8 @@ ITEM_CHILD_CAPABILITIES = {
 }
 ITEM_CHILD_TYPES = set(ITEM_CHILD_CAPABILITIES) | {"item_audit_event"}
 APPEND_ONLY_TYPES = {"item_audit_event", "configuration_version"}
+# Records stored in the generic canonical_project_children table.
+PROJECT_CHILD_TYPES = {"quotation", "delivery_execution"}
 ENTITY_ORDER = {
     "customer": 0,
     "project": 1,
@@ -85,6 +87,11 @@ ENTITY_ORDER = {
     "configuration": 6,
     "configuration_version": 7,
     "quotation": 8,
+    # A delivery execution is raised against a quotation, so it must be
+    # authorized after it. Keeping them adjacent is what lets a client send the
+    # approved quotation and the delivery execution it opens in one atomic
+    # batch, in any client-side order.
+    "delivery_execution": 9,
 }
 
 
@@ -119,6 +126,37 @@ def _normalized(value) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+async def _current_quotation_id(
+    db: AsyncSession,
+    principal: Principal,
+    entity_id: str,
+    payload: dict,
+    *,
+    deleting: bool,
+) -> str:
+    """Resolve — and pin — the quotation a stored delivery execution belongs to.
+
+    The canonical child row records the owning Project but not the Quotation, so
+    the linkage is read back from the committed payload. Reading it from storage
+    rather than trusting the incoming payload is what makes the immutability
+    check meaningful: a client cannot re-point an execution at another quotation
+    by simply restating quotationID.
+    """
+    current = await db.get(
+        SyncEntity,
+        (principal.organization_id, "delivery_execution", entity_id),
+    )
+    if current is None or not isinstance(current.payload_json, dict):
+        raise AuthorizationRejected("existing delivery execution has no canonical payload")
+    stored = _normalized(current.payload_json.get("quotationID"))
+    if stored is None:
+        raise AuthorizationRejected("existing delivery execution lacks a canonical Quotation")
+    supplied = _normalized(payload.get("quotationID"))
+    if not deleting and supplied is not None and supplied != stored:
+        raise AuthorizationRejected("Delivery execution Quotation ownership is immutable")
+    return stored
 
 
 def _require_current_provenance(principal: Principal, payload: dict) -> None:
@@ -684,6 +722,76 @@ async def authorize_record(
             project_id=project.project_id,
         )
 
+    if entity_type == "delivery_execution":
+        canonical = await db.get(
+            CanonicalProjectChild,
+            (principal.organization_id, entity_type, entity_id),
+        )
+        if canonical is None:
+            if generic_entity_exists:
+                raise AuthorizationRejected("existing delivery execution lacks canonical ownership")
+            if deleting:
+                raise AuthorizationRejected("cannot tombstone an unknown delivery execution")
+            _require_identity(payload, entity_id, deleting=False)
+            quotation_id = _value(payload, "quotationID")
+        else:
+            quotation_id = await _current_quotation_id(
+                db, principal, entity_id, payload, deleting=deleting
+            )
+            _require_identity(payload, entity_id, deleting=deleting)
+
+        # The parent quotation must itself be canonical, active and in scope. A
+        # delivery execution is meaningless without the commercial document it
+        # executes, so this is checked on create and on every later update.
+        quotation = await db.get(
+            CanonicalProjectChild,
+            (principal.organization_id, "quotation", quotation_id),
+        )
+        if quotation is None or quotation.deleted_at is not None:
+            raise AuthorizationRejected("Delivery execution Quotation is not canonical and active")
+        # The canonical child row carries the Project linkage only; the
+        # commercial payload lives on the generic entity row, which is what the
+        # lifecycle validator reads too.
+        quotation_entity = await db.get(
+            SyncEntity,
+            (principal.organization_id, "quotation", quotation_id),
+        )
+        quotation_payload = (
+            quotation_entity.payload_json if quotation_entity is not None else None
+        )
+        if not isinstance(quotation_payload, dict):
+            raise AuthorizationRejected("Delivery execution Quotation payload is malformed")
+
+        project = await _project_for_scope(db, principal, scope, quotation.project_id)
+        if not deleting:
+            if payload.get("customerID") != project.customer_id:
+                raise AuthorizationRejected(
+                    "Delivery execution Customer does not match canonical Project"
+                )
+            # Mirrors the client's own DeliveryExecutionLifecycle.start: work
+            # cannot begin against a quotation the customer has not approved,
+            # and an approved status alone is not enough — the approval must be
+            # backed by its immutable event.
+            if quotation_payload.get("status") != "approved":
+                raise AuthorizationRejected(
+                    "Delivery execution Quotation must be approved"
+                )
+            quotation_events = quotation_payload.get("events")
+            if not isinstance(quotation_events, list) or not any(
+                isinstance(event, dict) and event.get("kind") == "approved"
+                for event in quotation_events
+            ):
+                raise AuthorizationRejected(
+                    "Delivery execution Quotation is approved without its approval event"
+                )
+            _require_capability(principal, "delivery.manage")
+
+        return OwnershipPlan(
+            "delivery_execution", entity_id, canonical is None, deleted_at,
+            customer_id=project.customer_id,
+            project_id=project.project_id,
+        )
+
     raise AuthorizationRejected(f"canonical authorization is not implemented for {entity_type}")
 
 
@@ -768,7 +876,7 @@ async def apply_ownership_plan(
         await db.flush()
         return
 
-    if plan.entity_type == "quotation":
+    if plan.entity_type in PROJECT_CHILD_TYPES:
         assert plan.project_id is not None
         model = await db.get(
             CanonicalProjectChild,
@@ -784,7 +892,10 @@ async def apply_ownership_plan(
             ))
         else:
             if model.project_id != plan.project_id:
-                raise AuthorizationRejected("Quotation Project ownership is immutable")
+                label = plan.entity_type.replace("_", " ").capitalize()
+                raise AuthorizationRejected(
+                    f"{label} Project ownership is immutable"
+                )
             model.deleted_at = plan.deleted_at
         await db.flush()
         return
@@ -882,7 +993,7 @@ async def record_is_visible(
             return False
         project = await db.get(CanonicalProject, (principal.organization_id, item.project_id))
         return project is not None and scope.can_access_project(project.project_id, project.customer_id)
-    if entity_type == "quotation":
+    if entity_type in PROJECT_CHILD_TYPES:
         child = await db.get(
             CanonicalProjectChild,
             (principal.organization_id, entity_type, entity_id),
