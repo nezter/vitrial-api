@@ -18,18 +18,16 @@ Run with POSTGRES_INTEGRATION=1 against a migrated database.
 
 from __future__ import annotations
 
-import base64
-import json
 import os
 from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy import text
 
 from app.auth import Principal
 from app.db import SessionFactory
 from app.models import CanonicalCustomer, Organization, SyncChangeLog, SyncEntity, User
-from app.schemas import SyncBatch, SyncRecord
-from app.sync_service import MAX_SYNC_PULL_SCAN_CHANGES, apply_push, pull_since
+from app.sync_service import MAX_SYNC_PULL_SCAN_CHANGES, pull_since
 
 pytestmark = pytest.mark.skipif(
     os.getenv("POSTGRES_INTEGRATION") != "1",
@@ -37,32 +35,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 NOW = "2026-09-06T14:00:00Z"
-
-
-def encoded(payload: dict) -> str:
-    return base64.b64encode(
-        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-    ).decode()
-
-
-def record(record_id: str, entity_id: str, payload: dict, mutation_id: str) -> dict:
-    return {
-        "id": record_id,
-        "entityType": "customer",
-        "entityID": entity_id,
-        "updatedAt": NOW,
-        "payload": encoded(payload),
-        "baseServerRevision": None,
-        "clientMutationID": mutation_id,
-        "deletedAt": None,
-    }
-
-
-# Every customer this test creates must be inside the principal's scope.
-# record_is_visible() checks CanonicalCustomer *and* the effective scope, so a
-# pushed record with no canonical row -- or one outside customer_ids -- is
-# correctly filtered out and the page comes back empty.
-CUSTOMER_IDS = frozenset(f"customer-{i:04d}" for i in range(600))
 
 
 def actor() -> Principal:
@@ -81,10 +53,11 @@ def actor() -> Principal:
 
 
 async def clear(db) -> None:
-    from sqlalchemy import delete, text
+    from sqlalchemy import delete
 
     await db.execute(delete(SyncChangeLog))
     await db.execute(delete(SyncEntity))
+    await db.execute(delete(CanonicalCustomer))
     await db.execute(delete(User))
     await db.execute(delete(Organization))
     await db.commit()
@@ -96,27 +69,41 @@ async def seed_org(db) -> None:
     await db.commit()
 
 
-async def push_customers(db, count: int, *, payload_bytes: int = 8) -> None:
-    """Create `count` customers, each carrying a payload of roughly `payload_bytes`.
+async def seed_deliverable_customers(db, count: int, *, payload_bytes: int = 8) -> None:
+    """Seed `count` visible customers, each with a SyncChangeLog entry.
 
-    Also inserts the CanonicalCustomer row each one needs. Without it the record
-    is invisible: record_is_visible() requires both the canonical row and scope.
+    Rows are written directly rather than through apply_push. apply_push runs
+    authorize_record(), and on the create path that calls _grant_created_scope(),
+    which demands a canonical, active Membership row -- setup these tests are not
+    about. Seeding directly keeps the only dependency on production code the one
+    under test: pull_since.
     """
     for i in range(count):
-        db.add(CanonicalCustomer(organization_id="org-1", customer_id=f"customer-{i:04d}"))
+        customer_id = f"customer-{i:04d}"
+        db.add(CanonicalCustomer(organization_id="org-1", customer_id=customer_id))
+        db.flush()
+        db.add(SyncEntity(
+            organization_id="org-1",
+            entity_type="customer",
+            entity_id=customer_id,
+            server_revision=1,
+            schema_version=1,
+            payload_json={"id": customer_id, "name": "C" * payload_bytes, "index": i},
+            updated_at=datetime(2026, 9, 6, 14, 0, tzinfo=timezone.utc),
+            deleted_at=None,
+        ))
+        db.add(SyncChangeLog(
+            organization_id="org-1",
+            entity_type="customer",
+            entity_id=customer_id,
+            server_revision=1,
+            operation="upsert",
+            client_mutation_id=f"mutation-{i:04d}",
+            created_at=datetime(2026, 9, 6, 14, 0, tzinfo=timezone.utc),
+        ))
+        # Flush per row so each change gets its own sequence, keeping cursors
+        # aligned 1:1 with customer-0000..n-1 rather than relying on ordering.
         await db.flush()
-        batch = SyncBatch.model_validate({
-            "deviceID": "device-1",
-            "records": [
-                record(
-                    f"record-{i:04d}",
-                    f"customer-{i:04d}",
-                    {"name": "C" * payload_bytes, "index": i},
-                    f"mutation-{i:04d}",
-                )
-            ],
-        })
-        await apply_push(db, actor(), batch)
     await db.commit()
 
 
@@ -131,7 +118,7 @@ async def test_cursor_advances_when_the_page_is_fully_consumed():
     async with SessionFactory() as db:
         await clear(db)
         await seed_org(db)
-        await push_customers(db, 5)
+        await seed_deliverable_customers(db, 5)
 
         pulled = await pull_since(db, actor(), "seq:0")
         assert len(pulled.records) == 5
@@ -156,7 +143,7 @@ async def test_cursor_stops_before_a_deliverable_record_that_does_not_fit(monkey
     async with SessionFactory() as db:
         await clear(db)
         await seed_org(db)
-        await push_customers(db, 6, payload_bytes=4_000)
+        await seed_deliverable_customers(db, 6, payload_bytes=4_000)
 
         # Small enough that only a couple of the 4 KB records fit per page.
         # monkeypatch restores the constant even if an assertion fails, which a
