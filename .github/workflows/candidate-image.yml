@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/SCRUM-21-remote-catalogs-v2
+      - feature/delivery-closeout-complete
   workflow_dispatch:
 
 permissions:

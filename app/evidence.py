@@ -10,6 +10,7 @@ from app.auth import Principal
 from app.evidence_gc import queue_blob_gc
 from app.models import CanonicalItemChild, EvidenceBlob, Organization
 from app.ownership import AuthorizationRejected, require_item_access
+from app.settings import settings
 from app.storage import (
     StorageDigestMismatch,
     StorageError,
@@ -18,8 +19,27 @@ from app.storage import (
 )
 
 
+class EvidenceBlobTooLarge(Exception):
+    pass
+
+
 async def bytes_chunks(body: bytes) -> AsyncIterator[bytes]:
     yield body
+
+
+async def bounded_chunks(
+    chunks: AsyncIterable[bytes],
+    max_bytes: int,
+) -> AsyncIterator[bytes]:
+    limit = max(1, max_bytes)
+    consumed = 0
+    async for chunk in chunks:
+        if not chunk:
+            continue
+        consumed += len(chunk)
+        if consumed > limit:
+            raise EvidenceBlobTooLarge(f"evidence blob exceeds {limit} bytes")
+        yield chunk
 
 
 async def _evidence_metadata(
@@ -81,14 +101,21 @@ async def put_blob(
     await db.rollback()
     if isinstance(chunks, bytes):
         chunks = bytes_chunks(chunks)
+    chunks = bounded_chunks(chunks, settings.evidence_max_bytes)
 
     store = current_store()
     new_key = object_key_for(principal.organization_id, document_id, expected_sha256)
     try:
         stored = await store.put_verified(new_key, chunks, expected_sha256)
+    except EvidenceBlobTooLarge as exc:
+        raise HTTPException(413, "evidence blob exceeds configured upload limit") from exc
     except StorageDigestMismatch as exc:
         raise HTTPException(409, "content digest mismatch") from exc
     except StorageError as exc:
+        # S3ObjectStore deliberately wraps arbitrary streaming failures after aborting
+        # multipart state. Preserve the size-limit semantic through that cleanup layer.
+        if isinstance(exc.__cause__, EvidenceBlobTooLarge):
+            raise HTTPException(413, "evidence blob exceeds configured upload limit") from exc
         raise HTTPException(503, "evidence object storage unavailable") from exc
 
     # Serialize only the canonical pointer switch with sync/tombstones. Concurrent uploads may

@@ -3,15 +3,22 @@ from datetime import datetime
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
+MAX_SYNC_RECORDS = 200
+MAX_SYNC_IDENTIFIER_LENGTH = 256
+# Swift's V1 client budgets 1.5 MB of raw payload per batch. Data is represented as
+# base64 on the JSON wire, so leave enough room for that expansion while rejecting
+# anomalously large individual records.
+MAX_SYNC_V1_WIRE_PAYLOAD_BYTES = 2_100_000
+
 Capability = Literal[
     "customer.create", "customer.edit", "project.create", "project.edit",
     "item.create", "item.edit", "item.readiness.change", "item.readiness.override",
     "item.blockers.manage", "item.measurements.manage", "item.evidence.manage",
     "item.requirements.manage", "item.configuration.manage",
     "item.configuration.finalize", "item.configuration.reopen",
-    "quotation.create", "quotation.send", "quotation.approve",
-    "delivery.manage", "catalog.manage", "pricing.manage",
-    "organization.members.manage", "organization.roles.manage", "sync",
+    "quotation.create", "quotation.send", "quotation.approve", "delivery.manage",
+    "catalog.manage", "pricing.manage", "organization.members.manage",
+    "organization.roles.manage", "sync",
 ]
 EntityType = Literal[
     "customer", "project", "project_sector", "item", "item_audit_event",
@@ -57,20 +64,20 @@ class AuthorizationProfile(StrictModel):
     roles: list[AuthorizationRole] = Field(default_factory=list)
 
 class SyncRecord(StrictModel):
-    id: str
+    id: str = Field(min_length=1, max_length=MAX_SYNC_IDENTIFIER_LENGTH)
     entityType: EntityType
-    entityID: str
+    entityID: str = Field(min_length=1, max_length=MAX_SYNC_IDENTIFIER_LENGTH)
     updatedAt: datetime
-    payload: bytes
+    payload: bytes = Field(max_length=MAX_SYNC_V1_WIRE_PAYLOAD_BYTES)
     baseServerRevision: int | None = Field(default=None, ge=0)
     serverRevision: int | None = Field(default=None, ge=0)
-    clientMutationID: str | None = None
+    clientMutationID: str | None = Field(default=None, max_length=MAX_SYNC_IDENTIFIER_LENGTH)
     deletedAt: datetime | None = None
 
 class SyncBatch(StrictModel):
-    deviceID: str
-    cursor: str | None = None
-    records: list[SyncRecord] = Field(default_factory=list)
+    deviceID: str = Field(min_length=1, max_length=MAX_SYNC_IDENTIFIER_LENGTH)
+    cursor: str | None = Field(default=None, max_length=MAX_SYNC_IDENTIFIER_LENGTH)
+    records: list[SyncRecord] = Field(default_factory=list, max_length=MAX_SYNC_RECORDS)
 
 class SyncResult(StrictModel):
     acceptedRecordIDs: list[str] = Field(default_factory=list)

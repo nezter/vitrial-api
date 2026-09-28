@@ -6,6 +6,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import Principal
+from app.delivery_execution import (
+    DELIVERY_ENTITY_TYPE,
+    DeliveryExecutionRejected,
+    apply_delivery_execution_ownership,
+    authorize_delivery_execution,
+    delivery_execution_is_visible,
+)
 from app.evidence_gc import queue_blob_gc
 from app.idempotency import SyncMutationFingerprint, request_fingerprint
 from app.lifecycle import LifecycleRejected, validate_lifecycle_mutation
@@ -232,17 +239,34 @@ async def apply_push(db: AsyncSession, principal: Principal, batch: SyncBatch) -
                 deleted_at=record.deletedAt,
                 current=current,
             )
-            plan = await authorize_record(
-                db,
-                principal,
-                scope,
-                entity_type=record.entityType,
-                entity_id=record.entityID,
-                payload=payload,
-                deleted_at=record.deletedAt,
-                generic_entity_exists=current is not None,
-            )
-            await apply_ownership_plan(db, principal, scope, plan)
+            if record.entityType == DELIVERY_ENTITY_TYPE:
+                project_id = await authorize_delivery_execution(
+                    db,
+                    principal,
+                    scope,
+                    entity_id=record.entityID,
+                    payload=payload,
+                    deleted_at=record.deletedAt,
+                    current=current,
+                )
+                await apply_delivery_execution_ownership(
+                    db,
+                    principal,
+                    entity_id=record.entityID,
+                    project_id=project_id,
+                )
+            else:
+                plan = await authorize_record(
+                    db,
+                    principal,
+                    scope,
+                    entity_type=record.entityType,
+                    entity_id=record.entityID,
+                    payload=payload,
+                    deleted_at=record.deletedAt,
+                    generic_entity_exists=current is not None,
+                )
+                await apply_ownership_plan(db, principal, scope, plan)
             if record.entityType == "evidence" and record.deletedAt is not None:
                 blob = await db.get(
                     EvidenceBlob,
@@ -252,7 +276,12 @@ async def apply_push(db: AsyncSession, principal: Principal, batch: SyncBatch) -
                     # Queue physical deletion in the same transaction as the canonical metadata
                     # tombstone. The collector rechecks references before touching object storage.
                     await queue_blob_gc(db, blob, reason="metadata_tombstone")
-        except (InvalidMutation, AuthorizationRejected, LifecycleRejected) as exc:
+        except (
+            InvalidMutation,
+            AuthorizationRejected,
+            LifecycleRejected,
+            DeliveryExecutionRejected,
+        ) as exc:
             _record_mutation(
                 db, principal, batch, record,
                 status="rejected", result_revision=current_revision,
@@ -360,12 +389,20 @@ async def pull_since(db: AsyncSession, principal: Principal, cursor: str | None)
     max_seq = start
     for change in changes:
         max_seq = max(max_seq, change.sequence)
-        if not await record_is_visible(
-            db,
-            principal,
-            entity_type=change.entity_type,
-            entity_id=change.entity_id,
-        ):
+        if change.entity_type == DELIVERY_ENTITY_TYPE:
+            visible = await delivery_execution_is_visible(
+                db,
+                principal,
+                entity_id=change.entity_id,
+            )
+        else:
+            visible = await record_is_visible(
+                db,
+                principal,
+                entity_type=change.entity_type,
+                entity_id=change.entity_id,
+            )
+        if not visible:
             continue
         entity = await db.get(
             SyncEntity,

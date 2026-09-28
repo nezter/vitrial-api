@@ -4,32 +4,59 @@ import json
 from datetime import datetime
 from typing import Literal
 
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import Principal
-from app.schemas import EntityType, StrictModel, SyncBatch, SyncRecord
+from app.schemas import (
+    EntityType,
+    MAX_SYNC_IDENTIFIER_LENGTH,
+    MAX_SYNC_RECORDS,
+    StrictModel,
+    SyncBatch,
+    SyncRecord,
+)
 from app.sync_service import InvalidMutation, apply_push, decode_payload, pull_since
+
+MAX_SYNC_V2_PAYLOAD_BYTES = 1_500_000
+
+
+def _canonical_json_bytes(payload: dict[str, JsonValue]) -> bytes:
+    return json.dumps(
+        payload,
+        separators=(",", ":"),
+        sort_keys=True,
+        ensure_ascii=False,
+    ).encode("utf-8")
 
 
 class SyncRecordV2(StrictModel):
-    id: str
+    id: str = Field(min_length=1, max_length=MAX_SYNC_IDENTIFIER_LENGTH)
     entityType: EntityType
-    entityID: str
+    entityID: str = Field(min_length=1, max_length=MAX_SYNC_IDENTIFIER_LENGTH)
     updatedAt: datetime
     payload: dict[str, JsonValue] = Field(default_factory=dict)
     entitySchemaVersion: int = Field(default=1, ge=1)
     baseServerRevision: int | None = Field(default=None, ge=0)
     serverRevision: int | None = Field(default=None, ge=0)
-    clientMutationID: str | None = None
+    clientMutationID: str | None = Field(default=None, max_length=MAX_SYNC_IDENTIFIER_LENGTH)
     deletedAt: datetime | None = None
+
+    @field_validator("payload")
+    @classmethod
+    def payload_must_be_bounded(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        if len(_canonical_json_bytes(value)) > MAX_SYNC_V2_PAYLOAD_BYTES:
+            raise ValueError(
+                f"canonical payload exceeds {MAX_SYNC_V2_PAYLOAD_BYTES} bytes"
+            )
+        return value
 
 
 class SyncBatchV2(StrictModel):
     protocolVersion: Literal[2] = 2
-    deviceID: str
-    cursor: str | None = None
-    records: list[SyncRecordV2] = Field(default_factory=list)
+    deviceID: str = Field(min_length=1, max_length=MAX_SYNC_IDENTIFIER_LENGTH)
+    cursor: str | None = Field(default=None, max_length=MAX_SYNC_IDENTIFIER_LENGTH)
+    records: list[SyncRecordV2] = Field(default_factory=list, max_length=MAX_SYNC_RECORDS)
 
 
 class SyncResultV2(StrictModel):
@@ -43,15 +70,6 @@ class VersionResponseV2(StrictModel):
     apiVersion: Literal["v2"] = "v2"
     protocolVersion: Literal[2] = 2
     serviceVersion: str
-
-
-def _canonical_json_bytes(payload: dict[str, JsonValue]) -> bytes:
-    return json.dumps(
-        payload,
-        separators=(",", ":"),
-        sort_keys=True,
-        ensure_ascii=False,
-    ).encode("utf-8")
 
 
 def _to_v1_record(record: SyncRecordV2) -> SyncRecord:

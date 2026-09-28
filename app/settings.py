@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     evidence_storage_provider: Literal["local", "s3"] = "local"
     evidence_root: Path = Path(".evidence")
     evidence_gc_grace_seconds: int = 86400
+    # Defense-in-depth cap enforced while streaming, including chunked requests
+    # that omit Content-Length. Production may lower this value to match field policy.
+    evidence_max_bytes: int = 100 * 1024 * 1024
 
     s3_endpoint_url: str | None = None
     s3_access_key_id: str | None = None

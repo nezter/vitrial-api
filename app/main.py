@@ -17,6 +17,7 @@ from app.admin import (
     revoke_session,
 )
 from app.auth import Principal, current_principal, profile_for
+from app.auth_session_routes import router as auth_session_router
 from app.db import session_scope
 from app.evidence import put_blob
 from app.models import EvidenceBlob
@@ -37,6 +38,7 @@ from app.sync_service import InvalidMutation, apply_push, pull_since
 from app.sync_v2_routes import router as sync_v2_router
 
 app = FastAPI(title="Vitrial Connected Operations API", version=settings.service_version)
+app.include_router(auth_session_router)
 app.include_router(reference_router)
 app.include_router(sync_v2_router)
 
@@ -209,6 +211,10 @@ async def evidence_put(
     principal: Principal = Depends(current_principal),
     db: AsyncSession = Depends(session_scope),
 ) -> Response:
+    content_length = request.headers.get("content-length")
+    if content_length and content_length.isdigit() and int(content_length) > settings.evidence_max_bytes:
+        raise HTTPException(413, "evidence blob exceeds configured upload limit")
+
     model = await put_blob(
         db,
         principal,
@@ -269,9 +275,11 @@ async def evidence_get(
 )
 async def admin_bootstrap(
     request: AdminBootstrapRequest,
+    response: Response,
     _: None = Depends(require_admin_key),
     db: AsyncSession = Depends(session_scope),
 ) -> AdminBootstrapResponse:
+    response.headers["Cache-Control"] = "no-store"
     return await bootstrap_identity(db, request)
 
 
