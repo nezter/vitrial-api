@@ -687,3 +687,134 @@ async def test_evidence_upload_uses_canonical_item_scope_and_capability(tmp_path
         assert exc.value.status_code == 403
         assert await db.get(EvidenceBlob, ("org-1", "doc-2")) is None
         await clear_database(db)
+
+@pytest.mark.asyncio
+async def test_pull_resume_cursor_consumes_invisible_rows_without_skipping_oversize_visible_record(monkeypatch):
+    actor = principal(
+        capabilities={"sync"},
+        customer_ids={"customer-visible-a", "customer-visible-b"},
+    )
+    now = datetime.now(timezone.utc)
+
+    async with SessionFactory() as db:
+        await clear_database(db)
+        db.add(Organization(id="org-1", name="Vitrial", authorization_revision=1))
+        await db.flush()
+        db.add_all([
+            CanonicalCustomer(organization_id="org-1", customer_id="customer-hidden-x"),
+            CanonicalCustomer(organization_id="org-1", customer_id="customer-visible-a"),
+            CanonicalCustomer(organization_id="org-1", customer_id="customer-visible-b"),
+        ])
+        db.add_all([
+            SyncEntity(
+                organization_id="org-1",
+                entity_type="customer",
+                entity_id="customer-hidden-x",
+                server_revision=1,
+                schema_version=1,
+                payload_json={"id": "customer-hidden-x", "name": "Hidden XXX"},
+                updated_at=now,
+                deleted_at=None,
+            ),
+            SyncEntity(
+                organization_id="org-1",
+                entity_type="customer",
+                entity_id="customer-visible-a",
+                server_revision=2,
+                schema_version=1,
+                payload_json={"id": "customer-visible-a", "name": "Visible A"},
+                updated_at=now,
+                deleted_at=None,
+            ),
+            SyncEntity(
+                organization_id="org-1",
+                entity_type="customer",
+                entity_id="customer-visible-b",
+                server_revision=3,
+                schema_version=1,
+                payload_json={"id": "customer-visible-b", "name": "Visible B"},
+                updated_at=now,
+                deleted_at=None,
+            ),
+        ])
+        await db.flush()
+
+        changes = [
+            SyncChangeLog(
+                organization_id="org-1",
+                entity_type="customer",
+                entity_id="customer-hidden-x",
+                server_revision=1,
+                client_mutation_id="mutation-hidden-x",
+                operation="upsert",
+            ),
+            SyncChangeLog(
+                organization_id="org-1",
+                entity_type="customer",
+                entity_id="customer-visible-a",
+                server_revision=2,
+                client_mutation_id="mutation-visible-a",
+                operation="upsert",
+            ),
+            SyncChangeLog(
+                organization_id="org-1",
+                entity_type="customer",
+                entity_id="customer-visible-b",
+                server_revision=3,
+                client_mutation_id="mutation-visible-b",
+                operation="upsert",
+            ),
+        ]
+        db.add_all(changes)
+        await db.flush()
+        hidden_sequence, first_sequence, second_sequence = [
+            int(change.sequence) for change in changes
+        ]
+        assert hidden_sequence < first_sequence < second_sequence
+        await db.commit()
+
+        baseline = await pull_since(db, actor, "seq:0")
+        assert [entry.entityID for entry in baseline.records] == [
+            "customer-visible-a",
+            "customer-visible-b",
+        ]
+
+        single_page_sizes = [
+            len(
+                SyncBatch(
+                    deviceID="server",
+                    cursor=f"seq:{sequence}",
+                    records=[entry],
+                ).model_dump_json().encode("utf-8")
+            )
+            for sequence, entry in (
+                (first_sequence, baseline.records[0]),
+                (second_sequence, baseline.records[1]),
+            )
+        ]
+        response_limit = max(single_page_sizes) + 1
+        two_record_size = len(
+            SyncBatch(
+                deviceID="server",
+                cursor=f"seq:{second_sequence}",
+                records=baseline.records,
+            ).model_dump_json().encode("utf-8")
+        )
+        assert two_record_size > response_limit
+        monkeypatch.setattr(
+            "app.sync_service.MAX_SYNC_PULL_RESPONSE_BYTES",
+            response_limit,
+        )
+
+        first_page = await pull_since(db, actor, "seq:0")
+        assert [entry.entityID for entry in first_page.records] == ["customer-visible-a"]
+        assert first_page.cursor == f"seq:{first_sequence}"
+
+        second_page = await pull_since(db, actor, first_page.cursor)
+        assert [entry.entityID for entry in second_page.records] == ["customer-visible-b"]
+        assert second_page.cursor == f"seq:{second_sequence}"
+
+        exhausted = await pull_since(db, actor, second_page.cursor)
+        assert exhausted.records == []
+        assert exhausted.cursor == f"seq:{second_sequence}"
+        await clear_database(db)
