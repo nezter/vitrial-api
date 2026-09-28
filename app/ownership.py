@@ -856,6 +856,180 @@ async def require_item_access(
     return await _item_for_scope(db, principal, scope, item_id)
 
 
+async def visible_record_keys(
+    db: AsyncSession,
+    principal: Principal,
+    records: list[tuple[str, str]],
+) -> set[tuple[str, str]]:
+    """Resolve pull visibility for a bounded change window using set-based ownership reads.
+
+    This mirrors record_is_visible plus delivery_execution_is_visible semantics without
+    widening scope or trusting child payloads. Tombstoned generic sync records remain
+    visible where the existing per-record resolver allows them; delivery execution keeps
+    its stricter active-child/active-project rule.
+    """
+    if not records:
+        return set()
+
+    scope = EffectiveScope.from_principal(principal)
+    requested: dict[str, set[str]] = {}
+    for entity_type, entity_id in records:
+        requested.setdefault(entity_type, set()).add(entity_id)
+
+    customer_ids = requested.get("customer", set())
+    customers = (
+        await db.scalars(
+            select(CanonicalCustomer).where(
+                CanonicalCustomer.organization_id == principal.organization_id,
+                CanonicalCustomer.customer_id.in_(customer_ids),
+            )
+        )
+    ).all() if customer_ids else []
+    customers_by_id = {row.customer_id: row for row in customers}
+
+    sector_ids = requested.get("project_sector", set())
+    sectors = (
+        await db.scalars(
+            select(CanonicalProjectSector).where(
+                CanonicalProjectSector.organization_id == principal.organization_id,
+                CanonicalProjectSector.project_sector_id.in_(sector_ids),
+            )
+        )
+    ).all() if sector_ids else []
+    sectors_by_id = {row.project_sector_id: row for row in sectors}
+
+    project_child_types = {"quotation", "delivery_execution"}
+    project_child_ids = set().union(
+        *(requested.get(entity_type, set()) for entity_type in project_child_types)
+    )
+    project_children = (
+        await db.scalars(
+            select(CanonicalProjectChild).where(
+                CanonicalProjectChild.organization_id == principal.organization_id,
+                CanonicalProjectChild.entity_type.in_(project_child_types),
+                CanonicalProjectChild.entity_id.in_(project_child_ids),
+            )
+        )
+    ).all() if project_child_ids else []
+    project_children_by_key = {
+        (row.entity_type, row.entity_id): row
+        for row in project_children
+        if row.entity_id in requested.get(row.entity_type, set())
+    }
+
+    item_child_ids = set().union(
+        *(requested.get(entity_type, set()) for entity_type in ITEM_CHILD_TYPES)
+    )
+    item_children = (
+        await db.scalars(
+            select(CanonicalItemChild).where(
+                CanonicalItemChild.organization_id == principal.organization_id,
+                CanonicalItemChild.entity_type.in_(ITEM_CHILD_TYPES),
+                CanonicalItemChild.entity_id.in_(item_child_ids),
+            )
+        )
+    ).all() if item_child_ids else []
+    item_children_by_key = {
+        (row.entity_type, row.entity_id): row
+        for row in item_children
+        if row.entity_id in requested.get(row.entity_type, set())
+    }
+
+    item_ids = set(requested.get("item", set()))
+    item_ids.update(row.item_id for row in item_children)
+    items = (
+        await db.scalars(
+            select(CanonicalItem).where(
+                CanonicalItem.organization_id == principal.organization_id,
+                CanonicalItem.item_id.in_(item_ids),
+            )
+        )
+    ).all() if item_ids else []
+    items_by_id = {row.item_id: row for row in items}
+
+    project_ids = set(requested.get("project", set()))
+    project_ids.update(row.project_id for row in sectors)
+    project_ids.update(row.project_id for row in project_children)
+    project_ids.update(row.project_id for row in items)
+    projects = (
+        await db.scalars(
+            select(CanonicalProject).where(
+                CanonicalProject.organization_id == principal.organization_id,
+                CanonicalProject.project_id.in_(project_ids),
+            )
+        )
+    ).all() if project_ids else []
+    projects_by_id = {row.project_id: row for row in projects}
+
+    visible: set[tuple[str, str]] = set()
+    for entity_type, entity_id in records:
+        key = (entity_type, entity_id)
+        if entity_type == "customer":
+            customer = customers_by_id.get(entity_id)
+            if customer is not None and scope.can_access_customer(customer.customer_id):
+                visible.add(key)
+            continue
+
+        if entity_type == "project":
+            project = projects_by_id.get(entity_id)
+            if project is not None and scope.can_access_project(
+                project.project_id, project.customer_id
+            ):
+                visible.add(key)
+            continue
+
+        if entity_type == "project_sector":
+            sector = sectors_by_id.get(entity_id)
+            project = projects_by_id.get(sector.project_id) if sector is not None else None
+            if project is not None and scope.can_access_project(
+                project.project_id, project.customer_id
+            ):
+                visible.add(key)
+            continue
+
+        if entity_type == "item":
+            item = items_by_id.get(entity_id)
+            project = projects_by_id.get(item.project_id) if item is not None else None
+            if project is not None and scope.can_access_project(
+                project.project_id, project.customer_id
+            ):
+                visible.add(key)
+            continue
+
+        if entity_type == "quotation":
+            child = project_children_by_key.get(key)
+            project = projects_by_id.get(child.project_id) if child is not None else None
+            if project is not None and scope.can_access_project(
+                project.project_id, project.customer_id
+            ):
+                visible.add(key)
+            continue
+
+        if entity_type == "delivery_execution":
+            child = project_children_by_key.get(key)
+            project = projects_by_id.get(child.project_id) if child is not None else None
+            if (
+                child is not None
+                and child.deleted_at is None
+                and project is not None
+                and project.deleted_at is None
+                and scope.can_access_project(project.project_id, project.customer_id)
+            ):
+                visible.add(key)
+            continue
+
+        if entity_type in ITEM_CHILD_TYPES:
+            child = item_children_by_key.get(key)
+            item = items_by_id.get(child.item_id) if child is not None else None
+            project = projects_by_id.get(item.project_id) if item is not None else None
+            if project is not None and scope.can_access_project(
+                project.project_id, project.customer_id
+            ):
+                visible.add(key)
+
+    return visible
+
+
 async def record_is_visible(
     db: AsyncSession,
     principal: Principal,
