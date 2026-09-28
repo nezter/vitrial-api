@@ -11,7 +11,6 @@ from app.delivery_execution import (
     DeliveryExecutionRejected,
     apply_delivery_execution_ownership,
     authorize_delivery_execution,
-    delivery_execution_is_visible,
 )
 from app.evidence_gc import queue_blob_gc
 from app.idempotency import SyncMutationFingerprint, request_fingerprint
@@ -24,7 +23,7 @@ from app.ownership import (
     apply_ownership_plan,
     authorize_record,
     mutation_sort_key,
-    record_is_visible,
+    visible_record_keys,
 )
 from app.schemas import (
     MAX_SYNC_RECORDS,
@@ -409,32 +408,40 @@ async def pull_since(db: AsyncSession, principal: Principal, cursor: str | None)
         )
     ).all()
 
+    change_keys = [(change.entity_type, change.entity_id) for change in changes]
+    visible_keys = await visible_record_keys(db, principal, change_keys)
+
+    entity_by_key: dict[tuple[str, str], SyncEntity] = {}
+    if change_keys:
+        entity_types = {entity_type for entity_type, _ in change_keys}
+        entity_ids = {entity_id for _, entity_id in change_keys}
+        change_key_set = set(change_keys)
+        entity_rows = (
+            await db.scalars(
+                select(SyncEntity).where(
+                    SyncEntity.organization_id == principal.organization_id,
+                    SyncEntity.entity_type.in_(entity_types),
+                    SyncEntity.entity_id.in_(entity_ids),
+                )
+            )
+        ).all()
+        entity_by_key = {
+            (entity.entity_type, entity.entity_id): entity
+            for entity in entity_rows
+            if (entity.entity_type, entity.entity_id) in change_key_set
+        }
+
     records: list[SyncRecord] = []
     max_seq = start
     consumed_changes = 0
     for change in changes:
-        if change.entity_type == DELIVERY_ENTITY_TYPE:
-            visible = await delivery_execution_is_visible(
-                db,
-                principal,
-                entity_id=change.entity_id,
-            )
-        else:
-            visible = await record_is_visible(
-                db,
-                principal,
-                entity_type=change.entity_type,
-                entity_id=change.entity_id,
-            )
-        if not visible:
+        key = (change.entity_type, change.entity_id)
+        if key not in visible_keys:
             max_seq = change.sequence
             consumed_changes += 1
             continue
 
-        entity = await db.get(
-            SyncEntity,
-            (principal.organization_id, change.entity_type, change.entity_id),
-        )
+        entity = entity_by_key.get(key)
         if not entity:
             max_seq = change.sequence
             consumed_changes += 1
