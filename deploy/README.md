@@ -60,6 +60,38 @@ Real staging/production promotion must separately prove the actual S3 provider's
 
 For local/CI smoke tests `Caddyfile.smoke` serves `https://localhost` using Caddy's internal CA. Real device acceptance should use the normal `Caddyfile` and a publicly resolvable hostname so Caddy obtains a trusted certificate automatically.
 
+## Real object-storage durability promotion gate
+
+The CI S3 service is intentionally ephemeral. Before promoting a release that depends on evidence storage, run a two-phase probe against the actual staging or production-equivalent S3 provider. The probe uses Vitrial's `S3ObjectStore` directly and writes a disposable 6 MiB object by default, which exercises multipart upload, verified publication, HEAD/GET, and digest validation without using application evidence records.
+
+Run the write phase inside the deployed API container so it uses the exact release image and storage configuration:
+
+```bash
+COMPOSE="docker compose --env-file /etc/vitrial/vitrial.env -f deploy/compose.production.yml"
+$COMPOSE exec -T api python scripts/probe_s3_durability.py write
+```
+
+Record the returned `key`, `sha256`, and `sizeBytes` as release evidence. Then cross a real durability boundary without recreating the bucket: redeploy or restart the API; for self-hosted object storage also restart the storage service or node according to its normal operating procedure. Managed providers do not require an artificial provider restart, but the verification must occur after the application redeploy and outside the original process lifetime.
+
+Verify the exact same object afterward:
+
+```bash
+$COMPOSE exec -T api python scripts/probe_s3_durability.py verify \
+  --key 'release-probes/REPLACE_ME' \
+  --sha256 'REPLACE_WITH_RECORDED_SHA256'
+```
+
+A passing verify phase proves that the exact bytes published by the Vitrial storage implementation remained retrievable across the selected staging/production boundary. It does **not** by itself prove provider backup, retention, object-lock, or version-recovery policy. Capture those provider-level settings separately and perform at least one disposable restore/version-recovery drill before calling production durability proven.
+
+After preserving the evidence, remove only the disposable release probe:
+
+```bash
+$COMPOSE exec -T api python scripts/probe_s3_durability.py cleanup \
+  --key 'release-probes/REPLACE_ME'
+```
+
+The cleanup command refuses to delete keys outside the dedicated `release-probes/` prefix.
+
 ## Secret handling
 
 The repository intentionally contains no populated deployment env file. Runtime secret material must remain outside Git and restricted to the deployment operator. The validator rejects group/world-readable env files and known placeholder/default credentials. Structured application logs do not intentionally emit credentials or raw request bodies.
