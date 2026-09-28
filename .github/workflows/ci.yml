@@ -191,13 +191,22 @@ jobs:
           docker compose --env-file /tmp/vitrial-acceptance.env \
             -f deploy/compose.acceptance.yml logs --no-color
           exit 1
+      # Two independent durability claims, and both of them are real:
+      #   - a row written through Postgres is still there after a container restart
+      #   - an object written through the application's own S3 client is still there
+      #     after the storage container restarts
+      #
+      # The second replaces a marker file written straight into the storage
+      # container's /data volume. That proved a Docker named volume persists, which
+      # Docker guarantees, and said nothing about the S3 contract the application
+      # actually depends on. Pinned by tests/test_deployment_topology_claims.py.
       - name: Prove dependency readiness and restart persistence
         run: |
           COMPOSE="docker compose --env-file /tmp/vitrial-acceptance.env -f deploy/compose.acceptance.yml"
           $COMPOSE exec -T api python scripts/probe_dependencies.py
           $COMPOSE exec -T postgres psql -U vitrial -d vitrial -v ON_ERROR_STOP=1 \
             -c "CREATE TABLE IF NOT EXISTS deployment_smoke (id integer primary key); INSERT INTO deployment_smoke (id) VALUES (1) ON CONFLICT DO NOTHING;"
-          $COMPOSE exec -T s3 sh -ec 'printf persistent > /data/.vitrial-deployment-smoke'
+          $COMPOSE exec -T api python scripts/probe_evidence_durability.py write
           $COMPOSE restart postgres s3 api
           for attempt in $(seq 1 30); do
             if curl -kfsS https://localhost:8443/health >/dev/null; then
@@ -206,7 +215,7 @@ jobs:
             sleep 2
           done
           test "$($COMPOSE exec -T postgres psql -U vitrial -d vitrial -Atc 'SELECT count(*) FROM deployment_smoke WHERE id = 1')" = "1"
-          test "$($COMPOSE exec -T s3 sh -ec 'cat /data/.vitrial-deployment-smoke')" = "persistent"
+          $COMPOSE exec -T api python scripts/probe_evidence_durability.py verify
           $COMPOSE exec -T api python scripts/probe_dependencies.py --quiet
       - name: Tear down smoke deployment
         if: always()
