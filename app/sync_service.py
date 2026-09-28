@@ -26,11 +26,43 @@ from app.ownership import (
     mutation_sort_key,
     record_is_visible,
 )
-from app.schemas import SyncBatch, SyncRecord, SyncResult
+from app.schemas import (
+    MAX_SYNC_RECORDS,
+    MAX_SYNC_V1_BATCH_PAYLOAD_BYTES,
+    SyncBatch,
+    SyncRecord,
+    SyncResult,
+)
+
+# Upper bound on changes scanned for one pull. Bounds the query; it is not the
+# response ceiling (see MAX_SYNC_PULL_RESPONSE_BYTES).
+MAX_SYNC_PULL_SCAN_CHANGES = 500
+# Serialized ceiling for one pull response, checked against the batch as it
+# would actually be encoded rather than estimated from payload bytes.
+MAX_SYNC_PULL_RESPONSE_BYTES = 2_250_000
 
 
 class InvalidMutation(Exception):
     pass
+
+
+def pull_page_accepts(records: list[SyncRecord], record: SyncRecord, sequence: int) -> bool:
+    """Return whether one more visible record fits the public pull response contract.
+
+    Checked against the batch as it would actually be serialized, because
+    record-count and payload-byte ceilings alone do not bound the encoded
+    response once base64 and per-record framing are included.
+    """
+    if len(records) >= MAX_SYNC_RECORDS:
+        return False
+    if sum(len(item.payload) for item in records) + len(record.payload) > MAX_SYNC_V1_BATCH_PAYLOAD_BYTES:
+        return False
+    candidate = SyncBatch(
+        deviceID="server",
+        cursor=f"seq:{sequence}",
+        records=[*records, record],
+    )
+    return len(candidate.model_dump_json().encode("utf-8")) <= MAX_SYNC_PULL_RESPONSE_BYTES
 
 
 def decode_payload(record: SyncRecord) -> dict:
@@ -381,14 +413,18 @@ async def pull_since(db: AsyncSession, principal: Principal, cursor: str | None)
                 SyncChangeLog.sequence > start,
             )
             .order_by(SyncChangeLog.sequence.asc())
-            .limit(500)
+            .limit(MAX_SYNC_PULL_SCAN_CHANGES)
         )
     ).all()
 
     records: list[SyncRecord] = []
+    # The cursor advances only past changes actually consumed. An invisible
+    # change, or one whose entity is gone, IS consumed: it can never be
+    # delivered, so leaving it unconsumed would stall the cursor forever. A
+    # change that IS deliverable but does not fit the page is NOT consumed, so
+    # the next pull observes it again rather than skipping it.
     max_seq = start
     for change in changes:
-        max_seq = max(max_seq, change.sequence)
         if change.entity_type == DELIVERY_ENTITY_TYPE:
             visible = await delivery_execution_is_visible(
                 db,
@@ -403,16 +439,18 @@ async def pull_since(db: AsyncSession, principal: Principal, cursor: str | None)
                 entity_id=change.entity_id,
             )
         if not visible:
+            max_seq = max(max_seq, change.sequence)
             continue
         entity = await db.get(
             SyncEntity,
             (principal.organization_id, change.entity_type, change.entity_id),
         )
         if not entity:
+            max_seq = max(max_seq, change.sequence)
             continue
         payload = json.dumps(entity.payload_json or {}, separators=(",", ":"), sort_keys=True).encode()
         encoded_payload = base64.b64encode(payload)
-        records.append(SyncRecord(
+        record = SyncRecord(
             id=f"server:{change.sequence}",
             entityType=change.entity_type,
             entityID=change.entity_id,
@@ -421,7 +459,16 @@ async def pull_since(db: AsyncSession, principal: Principal, cursor: str | None)
             serverRevision=entity.server_revision,
             clientMutationID=change.client_mutation_id,
             deletedAt=entity.deleted_at,
-        ))
+        )
+
+        # Do not advance the cursor past a visible record that cannot fit this
+        # page. The next request must observe that same change rather than
+        # silently skip it.
+        if not pull_page_accepts(records, record, change.sequence):
+            break
+
+        records.append(record)
+        max_seq = max(max_seq, change.sequence)
 
     result = SyncBatch(deviceID="server", cursor=f"seq:{max_seq}", records=records)
     log_event(
