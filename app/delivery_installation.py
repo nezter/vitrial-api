@@ -7,11 +7,11 @@ from app.models import CanonicalItem, CanonicalItemChild
 
 
 class DeliveryInstallationRejected(Exception):
-    """An installation schedule/completion mutation violates delivery execution policy."""
+    """An installation schedule/completion/closeout mutation violates delivery execution policy."""
 
 
 INSTALLATION_EDITABLE_STATUSES = frozenset({"readyForInstallation", "scheduled"})
-INSTALLATION_FROZEN_STATUSES = frozenset({"installed", "complete"})
+INSTALLATION_FROZEN_STATUSES = frozenset({"complete"})
 
 
 def _normalized(value: object) -> str | None:
@@ -128,6 +128,38 @@ def _validate_schedule(
     return schedule
 
 
+def _validated_references(
+    references: object,
+    *,
+    label: str,
+    require_nonempty: bool,
+) -> list[dict]:
+    if not isinstance(references, list) or (require_nonempty and not references):
+        suffix = " requires at least one evidence reference" if require_nonempty else " evidence references are malformed"
+        raise DeliveryInstallationRejected(f"delivery installation {label}{suffix}")
+    seen: set[tuple[str, str]] = set()
+    normalized_references: list[dict] = []
+    for reference in references:
+        if not isinstance(reference, dict):
+            raise DeliveryInstallationRejected(
+                f"delivery installation {label} evidence reference is malformed"
+            )
+        item_id = _normalized(reference.get("itemID"))
+        document_id = _normalized(reference.get("documentID"))
+        if item_id is None or document_id is None:
+            raise DeliveryInstallationRejected(
+                f"delivery installation {label} evidence reference requires itemID and documentID"
+            )
+        key = (item_id, document_id)
+        if key in seen:
+            raise DeliveryInstallationRejected(
+                f"delivery installation {label} evidence references must be unique"
+            )
+        seen.add(key)
+        normalized_references.append(reference)
+    return normalized_references
+
+
 def _validate_completion(
     completion: object,
     schedule: dict | None,
@@ -173,32 +205,60 @@ def _validate_completion(
             "delivery installation completion note is invalid"
         )
 
-    references = completion.get("evidenceReferences")
-    if not isinstance(references, list) or not references:
-        raise DeliveryInstallationRejected(
-            "delivery installation completion requires at least one evidence reference"
-        )
-    seen: set[tuple[str, str]] = set()
-    for reference in references:
-        if not isinstance(reference, dict):
-            raise DeliveryInstallationRejected(
-                "delivery installation evidence reference is malformed"
-            )
-        item_id = _normalized(reference.get("itemID"))
-        document_id = _normalized(reference.get("documentID"))
-        if item_id is None or document_id is None:
-            raise DeliveryInstallationRejected(
-                "delivery installation evidence reference requires itemID and documentID"
-            )
-        key = (item_id, document_id)
-        if key in seen:
-            raise DeliveryInstallationRejected(
-                "delivery installation evidence references must be unique"
-            )
-        seen.add(key)
-
+    _validated_references(
+        completion.get("evidenceReferences"),
+        label="completion",
+        require_nonempty=True,
+    )
     _require_provenance(completion, principal, label="completion")
     return completion
+
+
+def _validate_closeout(
+    closeout: object,
+    completion: dict | None,
+    principal: Principal,
+) -> dict | None:
+    if closeout is None:
+        return None
+    if not isinstance(closeout, dict):
+        raise DeliveryInstallationRejected("delivery closeout is malformed")
+    if completion is None:
+        raise DeliveryInstallationRejected(
+            "delivery closeout requires recorded installation completion"
+        )
+    revision = closeout.get("revision")
+    if revision != 1 or isinstance(revision, bool):
+        raise DeliveryInstallationRejected(
+            "delivery closeout revision must be exactly one"
+        )
+    completion_revision = closeout.get("installationCompletionRevision")
+    if (
+        not isinstance(completion_revision, int)
+        or isinstance(completion_revision, bool)
+        or completion_revision != completion.get("revision")
+    ):
+        raise DeliveryInstallationRejected(
+            "delivery closeout completion revision does not match installed completion"
+        )
+    if _normalized(closeout.get("closedAt")) is None:
+        raise DeliveryInstallationRejected("delivery closeout closedAt is required")
+    if _normalized(closeout.get("updatedAt")) is None:
+        raise DeliveryInstallationRejected("delivery closeout updatedAt is required")
+    note = closeout.get("note")
+    if note is not None and not isinstance(note, str):
+        raise DeliveryInstallationRejected("delivery closeout note is invalid")
+    references = _validated_references(
+        closeout.get("evidenceReferences"),
+        label="closeout",
+        require_nonempty=False,
+    )
+    if not references and _normalized(note) is None:
+        raise DeliveryInstallationRejected(
+            "delivery closeout requires a final note or at least one evidence reference"
+        )
+    _require_provenance(closeout, principal, label="closeout")
+    return closeout
 
 
 def validate_installation_handoff(
@@ -215,9 +275,6 @@ def validate_installation_handoff(
         principal,
     )
 
-    # Once completion evidence has been recorded, the appointment it completed is immutable.
-    # Check this before validating the proposed completion against the proposed schedule so a
-    # forbidden reschedule reports the semantic freeze rather than a downstream revision mismatch.
     if current_payload is not None and current_payload.get("status") == "scheduled":
         raw_current_completion = current_payload.get("installationCompletion")
         if raw_current_completion is not None:
@@ -234,6 +291,11 @@ def validate_installation_handoff(
     completion = _validate_completion(
         payload.get("installationCompletion"),
         schedule,
+        principal,
+    )
+    closeout = _validate_closeout(
+        payload.get("deliveryCloseout"),
+        completion,
         principal,
     )
 
@@ -264,6 +326,14 @@ def validate_installation_handoff(
         raise DeliveryInstallationRejected(
             "save installation completion evidence before marking delivery Installed"
         )
+    if status != "complete" and closeout is not None:
+        raise DeliveryInstallationRejected(
+            "delivery closeout can only be recorded with the Complete transition"
+        )
+    if status == "complete" and closeout is None:
+        raise DeliveryInstallationRejected(
+            "record delivery closeout before marking delivery Complete"
+        )
     if current_payload is None:
         return
 
@@ -279,6 +349,11 @@ def validate_installation_handoff(
         current_schedule,
         principal,
     )
+    current_closeout = _validate_closeout(
+        current_payload.get("deliveryCloseout"),
+        current_completion,
+        principal,
+    )
 
     if current_status in INSTALLATION_FROZEN_STATUSES:
         if schedule != current_schedule:
@@ -288,6 +363,40 @@ def validate_installation_handoff(
         if completion != current_completion:
             raise DeliveryInstallationRejected(
                 "delivery installation completion is immutable after installation is recorded"
+            )
+        if closeout != current_closeout:
+            raise DeliveryInstallationRejected(
+                "delivery closeout is immutable after delivery is Complete"
+            )
+        return
+
+    if current_status == "installed":
+        if schedule != current_schedule:
+            raise DeliveryInstallationRejected(
+                "delivery installation schedule is immutable after installation is recorded"
+            )
+        if completion != current_completion:
+            raise DeliveryInstallationRejected(
+                "delivery installation completion is immutable after installation is recorded"
+            )
+        if status == "complete":
+            if current_closeout is not None:
+                raise DeliveryInstallationRejected(
+                    "delivery closeout is already recorded"
+                )
+            if closeout is None:
+                raise DeliveryInstallationRejected(
+                    "record delivery closeout before marking delivery Complete"
+                )
+            if closeout.get("updatedAt") != payload.get("updatedAt"):
+                raise DeliveryInstallationRejected(
+                    "delivery closeout updatedAt must match delivery execution updatedAt"
+                )
+            _require_provenance(closeout, principal, current_actor=True, label="closeout")
+            return
+        if closeout != current_closeout:
+            raise DeliveryInstallationRejected(
+                "delivery closeout can only be recorded with the Complete transition"
             )
         return
 
@@ -402,6 +511,45 @@ def validate_installation_handoff(
         _require_provenance(completion, principal, current_actor=True, label="completion")
 
 
+async def _validate_evidence_authority(
+    db: AsyncSession,
+    principal: Principal,
+    references: list[dict],
+    *,
+    project_id: str,
+    label: str,
+) -> None:
+    for reference in references:
+        if not isinstance(reference, dict):
+            raise DeliveryInstallationRejected(
+                f"delivery installation {label} evidence reference is malformed"
+            )
+        item_id = _normalized(reference.get("itemID"))
+        document_id = _normalized(reference.get("documentID"))
+        if item_id is None or document_id is None:
+            raise DeliveryInstallationRejected(
+                f"delivery installation {label} evidence reference requires itemID and documentID"
+            )
+
+        item = await db.get(CanonicalItem, (principal.organization_id, item_id))
+        if item is None or item.deleted_at is not None or item.project_id != project_id:
+            raise DeliveryInstallationRejected(
+                f"delivery installation {label} evidence Item is not active in the delivery Project"
+            )
+        evidence = await db.get(
+            CanonicalItemChild,
+            (principal.organization_id, "evidence", document_id),
+        )
+        if (
+            evidence is None
+            or evidence.deleted_at is not None
+            or evidence.item_id != item_id
+        ):
+            raise DeliveryInstallationRejected(
+                f"delivery installation {label} evidence is not canonical for the referenced Item"
+            )
+
+
 async def validate_installation_evidence_authority(
     db: AsyncSession,
     principal: Principal,
@@ -416,39 +564,32 @@ async def validate_installation_evidence_authority(
         if isinstance(current_payload, dict)
         else None
     )
-    if completion is None or completion == current_completion:
-        return
-    if not isinstance(completion, dict):
-        raise DeliveryInstallationRejected(
-            "delivery installation completion is malformed"
+    if completion is not None and completion != current_completion:
+        if not isinstance(completion, dict):
+            raise DeliveryInstallationRejected(
+                "delivery installation completion is malformed"
+            )
+        await _validate_evidence_authority(
+            db,
+            principal,
+            completion.get("evidenceReferences", []),
+            project_id=project_id,
+            label="completion",
         )
 
-    for reference in completion.get("evidenceReferences", []):
-        if not isinstance(reference, dict):
-            raise DeliveryInstallationRejected(
-                "delivery installation evidence reference is malformed"
-            )
-        item_id = _normalized(reference.get("itemID"))
-        document_id = _normalized(reference.get("documentID"))
-        if item_id is None or document_id is None:
-            raise DeliveryInstallationRejected(
-                "delivery installation evidence reference requires itemID and documentID"
-            )
-
-        item = await db.get(CanonicalItem, (principal.organization_id, item_id))
-        if item is None or item.deleted_at is not None or item.project_id != project_id:
-            raise DeliveryInstallationRejected(
-                "delivery installation evidence Item is not active in the delivery Project"
-            )
-        evidence = await db.get(
-            CanonicalItemChild,
-            (principal.organization_id, "evidence", document_id),
+    closeout = payload.get("deliveryCloseout")
+    current_closeout = (
+        current_payload.get("deliveryCloseout")
+        if isinstance(current_payload, dict)
+        else None
+    )
+    if closeout is not None and closeout != current_closeout:
+        if not isinstance(closeout, dict):
+            raise DeliveryInstallationRejected("delivery closeout is malformed")
+        await _validate_evidence_authority(
+            db,
+            principal,
+            closeout.get("evidenceReferences", []),
+            project_id=project_id,
+            label="closeout",
         )
-        if (
-            evidence is None
-            or evidence.deleted_at is not None
-            or evidence.item_id != item_id
-        ):
-            raise DeliveryInstallationRejected(
-                "delivery installation evidence is not canonical for the referenced Item"
-            )
