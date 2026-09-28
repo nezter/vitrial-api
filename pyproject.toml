@@ -8,7 +8,24 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115,<1",
-  "uvicorn[standard]>=0.32,<1",
+  # Plain uvicorn, not [standard].
+  #
+  # The `standard` extra pulls httptools, python-dotenv, pyyaml, uvloop,
+  # watchfiles and websockets. Of those:
+  #
+  #   uvloop, httptools  genuine production wins -- declared explicitly
+  #   python-dotenv      REQUIRED: pydantic-settings reads env_file=".env"
+  #   pyyaml             unused by this service
+  #   watchfiles         a development file-watching tool with no business
+  #                       in a production image
+  #   websockets          the service has no WebSocket route
+  #
+  # `[standard]` was a development convenience that shipped into the image.
+  # tests/test_production_dependencies.py keeps it from coming back.
+  "uvicorn>=0.32,<1",
+  "uvloop>=0.15.1",
+  "httptools>=0.8.0",
+  "python-dotenv>=0.13",
   "sqlalchemy[asyncio]>=2.0.36,<3",
   "asyncpg>=0.30,<1",
   "alembic>=1.14,<2",
