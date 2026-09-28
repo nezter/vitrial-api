@@ -13,6 +13,8 @@ from sqlalchemy import delete, event, func, select
 from app.auth import Principal, current_principal, token_hash
 from app.db import SessionFactory, engine
 from app.evidence import put_blob
+from app.delivery_execution import delivery_execution_is_visible
+from app.ownership import record_is_visible, visible_record_keys
 from app.models import (
     AuthSession,
     CanonicalCustomer,
@@ -909,4 +911,104 @@ async def test_pull_500_invisible_item_children_stays_within_fixed_query_budget(
     )
 
     async with SessionFactory() as db:
+        await clear_database(db)
+
+
+@pytest.mark.asyncio
+async def test_batched_pull_visibility_matches_existing_per_record_authority():
+    actor = principal(
+        capabilities={"sync"},
+        customer_ids={"customer-1"},
+        project_ids={"project-1"},
+    )
+    now = datetime.now(timezone.utc)
+
+    async with SessionFactory() as db:
+        await clear_database(db)
+        await seed_project_graph(db, second_project=True)
+        db.add_all([
+            CanonicalProjectChild(
+                organization_id="org-1",
+                entity_type="quotation",
+                entity_id="quotation-visible",
+                project_id="project-1",
+            ),
+            CanonicalProjectChild(
+                organization_id="org-1",
+                entity_type="quotation",
+                entity_id="quotation-hidden",
+                project_id="project-2",
+            ),
+            CanonicalProjectChild(
+                organization_id="org-1",
+                entity_type="delivery_execution",
+                entity_id="delivery-visible",
+                project_id="project-1",
+            ),
+            CanonicalProjectChild(
+                organization_id="org-1",
+                entity_type="delivery_execution",
+                entity_id="delivery-hidden",
+                project_id="project-2",
+            ),
+            CanonicalProjectChild(
+                organization_id="org-1",
+                entity_type="delivery_execution",
+                entity_id="delivery-deleted",
+                project_id="project-1",
+                deleted_at=now,
+            ),
+            CanonicalItemChild(
+                organization_id="org-1",
+                entity_type="measurement",
+                entity_id="measurement-visible",
+                item_id="item-1",
+            ),
+            CanonicalItemChild(
+                organization_id="org-1",
+                entity_type="measurement",
+                entity_id="measurement-hidden",
+                item_id="item-2",
+            ),
+        ])
+        await db.commit()
+
+        keys = [
+            ("customer", "customer-1"),
+            ("project", "project-1"),
+            ("project", "project-2"),
+            ("project_sector", "project-sector-1"),
+            ("project_sector", "project-sector-2"),
+            ("item", "item-1"),
+            ("item", "item-2"),
+            ("quotation", "quotation-visible"),
+            ("quotation", "quotation-hidden"),
+            ("measurement", "measurement-visible"),
+            ("measurement", "measurement-hidden"),
+            ("delivery_execution", "delivery-visible"),
+            ("delivery_execution", "delivery-hidden"),
+            ("delivery_execution", "delivery-deleted"),
+        ]
+
+        batched = await visible_record_keys(db, actor, keys)
+        expected: set[tuple[str, str]] = set()
+        for key in keys:
+            entity_type, entity_id = key
+            if entity_type == "delivery_execution":
+                visible = await delivery_execution_is_visible(
+                    db,
+                    actor,
+                    entity_id=entity_id,
+                )
+            else:
+                visible = await record_is_visible(
+                    db,
+                    actor,
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                )
+            if visible:
+                expected.add(key)
+
+        assert batched == expected
         await clear_database(db)
