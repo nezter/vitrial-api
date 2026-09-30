@@ -1,0 +1,18 @@
+[Unit]
+Description=Run Vitrial evidence garbage collection daily
+Documentation=file:///opt/vitrial-api/deploy/README.md
+
+[Timer]
+# 03:17 rather than 03:00 on purpose. Every scheduled job in the world fires on
+# the hour, and a job that talks to production object storage and a production
+# database does not need to be in that pile.
+OnCalendar=*-*-* 03:17:00
+# Catch up after downtime instead of silently skipping a day.
+Persistent=true
+# Spread the load a little further.
+RandomizedDelaySec=900
+# Run once shortly after enabling so the first collection is not a week away.
+OnBootSec=15min
+
+[Install]
+WantedBy=timers.target
