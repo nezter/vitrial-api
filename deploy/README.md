@@ -63,6 +63,57 @@ For local/CI smoke tests `Caddyfile.smoke` serves `https://localhost` using Cadd
 
 The repository intentionally contains no populated deployment env file. Runtime secret material must remain outside Git and restricted to the deployment operator. The validator rejects group/world-readable env files and known placeholder/default credentials. Structured application logs do not intentionally emit credentials or raw request bodies.
 
+## Evidence object garbage collection
+
+The API *enqueues* superseded evidence blobs for deletion, but something separate has
+to *delete* them. Until 2026-09-30 nothing did: `queue_blob_gc` was called from the
+request path, while `collect_due_evidence_gc` was only ever called from
+`scripts/gc_evidence.py` and from a test. `app/main.py` has no lifespan task or
+scheduler, and no GitHub workflow has a `schedule:` trigger, so rows accumulated in
+`evidence_object_gc` indefinitely and the S3 objects they named were never removed.
+`EVIDENCE_GC_GRACE_SECONDS` was documented and honoured by the collector, but nothing
+ever invoked the collector.
+
+Schedule it on the deployment host:
+
+```bash
+sudo cp deploy/gc-evidence.service deploy/gc-evidence.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now gc-evidence.timer
+```
+
+Edit `WorkingDirectory` and `VITRIAL_ENV_FILE` in the unit to match this host, then:
+
+```bash
+systemd-analyze verify /etc/systemd/system/gc-evidence.service
+systemctl list-timers gc-evidence.timer
+sudo systemctl start gc-evidence.service   # one run, now
+journalctl -u gc-evidence.service -n 50
+```
+
+The timer runs daily at 03:17 rather than 03:00. Every scheduled job in the world
+fires on the hour, and a job that talks to production object storage and a production
+database has no reason to be in that pile. `Persistent=true` means a host that was down
+at 03:17 collects on the next boot instead of silently skipping a day.
+
+The runner is a **dry run by default**. A human running it by hand has to pass
+`--execute` to delete anything; the timer passes it explicitly, so scheduled
+collection is unaffected.
+
+```bash
+scripts/run_evidence_gc.sh /etc/vitrial/vitrial.env              # reports only
+scripts/run_evidence_gc.sh /etc/vitrial/vitrial.env --execute    # deletes
+```
+
+The runner mirrors `scripts/deploy.sh`: it validates the env file first, then makes a
+one-shot `run --rm api` against the same pinned image and environment as the live
+service. The collector skips any object still referenced, honours `not_before` as a
+grace period, and takes `FOR UPDATE SKIP LOCKED` so two overlapping runs cannot delete
+the same object. It exits non-zero if any individual deletion failed, so a run that
+silently under-deletes is visible in `systemctl status` rather than looking healthy.
+
+Add the unit's result to the release evidence list below once it is installed.
+
 ## Backup and release evidence
 
 Before a real production migration, capture a provider-level PostgreSQL backup/snapshot and verify object-storage durability/versioning policy. Preserve the following release evidence:

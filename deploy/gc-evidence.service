@@ -1,0 +1,19 @@
+[Unit]
+Description=Vitrial API evidence object garbage collection
+Documentation=file:///opt/vitrial-api/deploy/README.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Adjust WorkingDirectory to wherever the deployment checkout lives on this host.
+# The runner script resolves its own root, so this only affects relative paths.
+WorkingDirectory=/opt/vitrial-api
+# Adjust to the host-only env file created during deployment (chmod 600).
+Environment=VITRIAL_ENV_FILE=/etc/vitrial/vitrial.env
+ExecStart=/opt/vitrial-api/scripts/run_evidence_gc.sh ${VITRIAL_ENV_FILE} --execute
+
+# A failed collection is a real signal, not noise: the script exits non-zero when
+# any deletion failed, and this unit should be visible when that happens.
+SuccessExitStatus=0
+TimeoutStartSec=1800
