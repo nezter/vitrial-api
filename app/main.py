@@ -4,7 +4,7 @@ import time
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin import (
@@ -21,6 +21,11 @@ from app.auth_session_routes import router as auth_session_router
 from app.db import session_scope
 from app.evidence import put_blob
 from app.models import EvidenceBlob
+from app.rate_limit import (
+    client_key_for,
+    limiter_for,
+    path_is_throttled,
+)
 from app.observability import (
     begin_request,
     bind_request_metadata,
@@ -87,6 +92,52 @@ async def request_correlation(request: Request, call_next):
         return response
     finally:
         end_request(tokens)
+
+
+@app.middleware("http")
+async def auth_surface_rate_limit(request: Request, call_next):
+    """Bound request rate on the unauthenticated auth surface.
+
+    Registered after `request_correlation` so a throttled request still gets a request
+    id and a completed-event log line, and so it is refused *before* the route handler:
+    no credential is read, no database work is done, and no `auth.pairing_exchange_*`
+    event is emitted. That last point matters, because unbounded rejected traffic is
+    otherwise an unbounded log-volume source.
+
+    The 429 body is fixed and carries no credential-derived information, so throttling
+    cannot be used as an oracle for whether a pairing code exists.
+
+    A limiter fault fails open: an internal error in the limiter must not become an
+    outage on the sign-in path.
+    """
+    if not path_is_throttled(request.url.path):
+        return await call_next(request)
+    try:
+        allowed, retry_after = limiter_for().allow(client_key_for(request))
+    except Exception as exc:  # pragma: no cover - defensive
+        log_event(
+            "auth.rate_limit_bypassed",
+            level=logging.ERROR,
+            errorType=type(exc).__name__,
+        )
+        return await call_next(request)
+    if allowed:
+        return await call_next(request)
+    retry_after_seconds = max(1, int(retry_after + 0.999))
+    log_event(
+        "auth.rate_limit_refused",
+        level=logging.WARNING,
+        routeTemplate=_route_template(request),
+        retryAfterSeconds=retry_after_seconds,
+    )
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "too many requests"},
+        headers={
+            "Retry-After": str(retry_after_seconds),
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @app.get("/health", response_model=HealthResponse, operation_id="health")
