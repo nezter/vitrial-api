@@ -133,24 +133,13 @@ async def seed(db) -> None:
         for entity_type in ("customer", "project", "project_sector", "item", "quotation"):
             entity_id = f"{entity_type}-{owner}"
 
-            if entity_type == "customer":
-                db.add(
-                    CanonicalCustomer(
-                        organization_id=ORG,
-                        customer_id=f"customer-record-{owner}",
-                    )
-                )
-                await db.flush()
-            elif entity_type == "project":
-                db.add(
-                    CanonicalProject(
-                        organization_id=ORG,
-                        project_id=f"project-record-{owner}",
-                        customer_id=f"customer-{owner}",
-                    )
-                )
-                await db.flush()
-            elif entity_type == "project_sector":
+            # `customer` and `project` need no extra canonical row: the change log
+            # references `{entity_type}-{owner}`, which is exactly the owning
+            # `customer-{owner}` / `project-{owner}` row created above. An earlier
+            # draft seeded `customer-record-*` / `project-record-*` here, which no
+            # change log referenced -- dead rows that the expected set then had to
+            # name, and which PostgreSQL correctly reported as undelivered.
+            if entity_type == "project_sector":
                 db.add(
                     CanonicalProjectSector(
                         organization_id=ORG,
@@ -302,17 +291,12 @@ async def test_scope_matrix_pins_delivery_per_entity_type():
         await seed(db)
 
     broad = await pull(principal())
-    # Customer records are seeded as `customer-record-{owner}`; the other four use
-    # `{entity_type}-{owner}`. The mismatch is a little awkward to read but it keeps
-    # the "owning customer" (`customer-{owner}`) distinct from the "customer record"
-    # (`customer-record-{owner}`), which is what makes the scope matrix meaningful.
+    # Every record whose canonical row resolves. `customer` and `project` need no
+    # dedicated row because the change log references `{entity_type}-{owner}`,
+    # which is the same id as the owning `customer-{owner}` / `project-{owner}`.
     assert delivered(broad) == {
-        ("customer", "customer-record-mine"),
-        ("customer", "customer-record-theirs"),
-    } | {
         (entity_type, f"{entity_type}-{owner}")
         for entity_type, _ in RESOLVING_TYPES
-        if entity_type != "customer"
         for owner in ("mine", "theirs")
     }
 
@@ -320,20 +304,16 @@ async def test_scope_matrix_pins_delivery_per_entity_type():
         principal(
             all_customers=False,
             all_projects=False,
-            customer_ids=frozenset({"customer-mine", "customer-record-mine"}),
+            customer_ids=frozenset({"customer-mine"}),
             project_ids=frozenset({"project-mine"}),
         )
     )
-    # `project-record-mine` is deliberately absent. The narrow principal holds
-    # `project-mine`, not `project-record-mine`, and `can_access_project` requires
-    # the project id itself to be in scope -- a project being inside an accessible
-    # customer is not enough. The `customer-record-mine` row *is* delivered,
-    # because customers are keyed on `customer_ids` and it is listed there.
+    # Exactly the `mine` half, and nothing from `theirs`. `project-mine` is present
+    # because it is in `project_ids` *and* its owner `customer-mine` is in
+    # `customer_ids` -- see the project-without-customer case below for why both
+    # are required.
     assert delivered(narrow) == {
-        ("customer", "customer-record-mine"),
-        ("project_sector", "project_sector-mine"),
-        ("item", "item-mine"),
-        ("quotation", "quotation-mine"),
+        (entity_type, f"{entity_type}-mine") for entity_type, _ in RESOLVING_TYPES
     }
 
 
