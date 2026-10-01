@@ -14,8 +14,10 @@ from httpx import ASGITransport, AsyncClient
 
 from app.main import app
 from app.request_size import (
+    DEFAULT_PATH_LIMITS,
     RequestSizeLimitMiddleware,
     RequestTooLarge,
+    _env_suffix,
     declared_length,
     limit_for_path,
     limits,
@@ -285,3 +287,20 @@ async def test_unlisted_path_accepts_a_large_body():
         for _ in range(5):
             response = await client.get("/health")
             assert response.status_code == 200
+
+def test_every_request_limit_override_crosses_the_deployment_boundary():
+    root = __import__("pathlib").Path(__file__).resolve().parents[1]
+    production = (root / "deploy" / "compose.production.yml").read_text(encoding="utf-8")
+    acceptance = (root / "deploy" / "compose.acceptance.yml").read_text(encoding="utf-8")
+    production_env = (root / "deploy" / "env.production.example").read_text(encoding="utf-8")
+    development_env = (root / ".env.example").read_text(encoding="utf-8")
+
+    for prefix, default in DEFAULT_PATH_LIMITS:
+        key = f"VITRIAL_MAX_BODY_BYTES_{_env_suffix(prefix)}"
+        interpolation = f"${{{key}:-{default}}}"
+        for compose in (production, acceptance):
+            assert f"{key}:" in compose
+            assert interpolation in compose
+        for env in (production_env, development_env):
+            assert f"{key}={default}" in env
+
