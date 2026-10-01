@@ -715,11 +715,36 @@ async def authorize_delivery_execution(
     if deleted_at is not None:
         raise DeliveryExecutionRejected("delivery execution history cannot be tombstoned")
 
-    current_payload = (
-        current.payload_json
-        if current is not None and isinstance(current.payload_json, dict)
-        else None
+    child = await db.get(
+        CanonicalProjectChild,
+        (principal.organization_id, DELIVERY_ENTITY_TYPE, entity_id),
     )
+
+    # delivery_execution history is non-deletable. Older generic delivery support
+    # briefly allowed tombstones, so presence alone is not enough to establish
+    # canonical continuity. A historical tombstone must stay inert rather than be
+    # silently reinterpreted as a fresh create and resurrected.
+    if current is not None:
+        if current.deleted_at is not None or not isinstance(current.payload_json, dict):
+            raise DeliveryExecutionRejected(
+                "existing delivery execution payload is not canonical and active"
+            )
+        if child is None:
+            raise DeliveryExecutionRejected(
+                "existing delivery execution lacks canonical ownership"
+            )
+        if child.deleted_at is not None:
+            raise DeliveryExecutionRejected(
+                "existing delivery execution ownership is tombstoned"
+            )
+        current_payload = current.payload_json
+    else:
+        if child is not None:
+            raise DeliveryExecutionRejected(
+                "delivery execution canonical ownership exists without canonical payload"
+            )
+        current_payload = None
+
     validate_delivery_execution_payload(
         payload,
         current_payload,
@@ -802,21 +827,6 @@ async def authorize_delivery_execution(
             "delivery execution quotedTotal does not match canonical quotation"
         )
 
-    child = await db.get(
-        CanonicalProjectChild,
-        (principal.organization_id, DELIVERY_ENTITY_TYPE, entity_id),
-    )
-    # Generic sync payload is never authorization evidence by itself. A delivery
-    # execution is canonical only when its payload and server-owned ownership row
-    # agree on existence; do not silently adopt or recreate either half.
-    if current is not None and child is None:
-        raise DeliveryExecutionRejected(
-            "existing delivery execution lacks canonical ownership"
-        )
-    if current is None and child is not None:
-        raise DeliveryExecutionRejected(
-            "delivery execution canonical ownership exists without canonical payload"
-        )
     if child is not None and child.project_id != project_id:
         raise DeliveryExecutionRejected(
             "delivery execution Project ownership is immutable"
@@ -844,11 +854,14 @@ async def apply_delivery_execution_ownership(
             deleted_at=None,
         ))
     else:
+        if child.deleted_at is not None:
+            raise DeliveryExecutionRejected(
+                "delivery execution tombstoned ownership cannot be resurrected"
+            )
         if child.project_id != project_id:
             raise DeliveryExecutionRejected(
                 "delivery execution Project ownership is immutable"
             )
-        child.deleted_at = None
     await db.flush()
 
 
@@ -858,6 +871,17 @@ async def delivery_execution_is_visible(
     *,
     entity_id: str,
 ) -> bool:
+    entity = await db.get(
+        SyncEntity,
+        (principal.organization_id, DELIVERY_ENTITY_TYPE, entity_id),
+    )
+    if (
+        entity is None
+        or entity.deleted_at is not None
+        or not isinstance(entity.payload_json, dict)
+    ):
+        return False
+
     child = await db.get(
         CanonicalProjectChild,
         (principal.organization_id, DELIVERY_ENTITY_TYPE, entity_id),
