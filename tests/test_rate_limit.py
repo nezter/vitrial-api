@@ -17,6 +17,8 @@ from app.pairing import PairingExchangeResponse
 
 from app.main import app
 from app.rate_limit import (
+    DEFAULT_LIMIT,
+    DEFAULT_WINDOW_SECONDS,
     SlidingWindowLimiter,
     client_key_for,
     limiter_for,
@@ -262,3 +264,25 @@ def test_invalid_configuration_falls_back_to_the_default(monkeypatch):
     monkeypatch.setenv("VITRIAL_AUTH_RATE_LIMIT", "-4")
     reset_limiter_for_tests()
     assert limit_for() == DEFAULT_LIMIT
+
+def test_rate_limit_configuration_crosses_the_deployment_boundary():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    production = (root / "deploy" / "compose.production.yml").read_text(encoding="utf-8")
+    acceptance = (root / "deploy" / "compose.acceptance.yml").read_text(encoding="utf-8")
+    production_env = (root / "deploy" / "env.production.example").read_text(encoding="utf-8")
+    development_env = (root / ".env.example").read_text(encoding="utf-8")
+
+    expected = {
+        "VITRIAL_AUTH_RATE_LIMIT": str(DEFAULT_LIMIT),
+        "VITRIAL_AUTH_RATE_WINDOW_SECONDS": str(int(DEFAULT_WINDOW_SECONDS)),
+    }
+    for key, default in expected.items():
+        interpolation = f"${{{key}:-{default}}}"
+        for compose in (production, acceptance):
+            assert f"{key}:" in compose
+            assert interpolation in compose
+        for env in (production_env, development_env):
+            assert f"{key}={default}" in env
+
