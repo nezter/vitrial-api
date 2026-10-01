@@ -22,6 +22,8 @@ def snapshot(**overrides) -> Snapshot:
         "pool_budget": 15,
         "orphan_payload_rows": 0,
         "orphan_ownership_rows": 0,
+        "tombstoned_payload_rows": 0,
+        "tombstoned_ownership_rows": 0,
         "object_storage": "ok",
     }
     values.update(overrides)
@@ -43,6 +45,15 @@ def test_preflight_rejects_migration_drift_and_delivery_half_rows():
     assert any("migration revision" in error for error in errors)
     assert any("without canonical ownership" in error for error in errors)
     assert any("without payload rows" in error for error in errors)
+
+
+def test_preflight_rejects_historical_delivery_tombstones():
+    errors = evaluate(snapshot(
+        tombstoned_payload_rows=1,
+        tombstoned_ownership_rows=1,
+    ))
+    assert any("tombstoned delivery_execution payload" in error for error in errors)
+    assert any("tombstoned delivery_execution ownership" in error for error in errors)
 
 
 def test_preflight_rejects_pool_budget_at_provider_ceiling():
