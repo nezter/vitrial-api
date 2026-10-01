@@ -262,15 +262,19 @@ async def apply_push(db: AsyncSession, principal: Principal, batch: SyncBatch) -
                 raise AuthorizationRejected(
                     "Item cannot be deleted while immutable audit history remains"
                 )
-            await validate_lifecycle_mutation(
-                db,
-                principal,
-                entity_type=record.entityType,
-                entity_id=record.entityID,
-                payload=payload,
-                deleted_at=record.deletedAt,
-                current=current,
-            )
+            # delivery_execution has a dedicated, stricter lifecycle/authority
+            # validator in authorize_delivery_execution. Running the older generic
+            # delivery validator as a second authority gate let the two copies drift.
+            if record.entityType != DELIVERY_ENTITY_TYPE:
+                await validate_lifecycle_mutation(
+                    db,
+                    principal,
+                    entity_type=record.entityType,
+                    entity_id=record.entityID,
+                    payload=payload,
+                    deleted_at=record.deletedAt,
+                    current=current,
+                )
             if record.entityType == DELIVERY_ENTITY_TYPE:
                 project_id = await authorize_delivery_execution(
                     db,

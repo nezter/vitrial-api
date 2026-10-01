@@ -256,3 +256,79 @@ async def test_delivery_execution_rejects_noncanonical_handoff():
             ("org-1", "delivery_execution", "delivery-1"),
         ) is None
         await clear_database(db)
+
+@pytest.mark.asyncio
+async def test_delivery_execution_rejects_orphan_generic_row_in_effective_push_path():
+    actor = principal(capabilities={"sync", "delivery.manage"})
+    async with SessionFactory() as db:
+        await clear_database(db)
+        await seed_approved_quotation(db, actor)
+
+        payload = delivery_payload(actor)
+        db.add(SyncEntity(
+            organization_id="org-1",
+            entity_type="delivery_execution",
+            entity_id="delivery-1",
+            server_revision=11,
+            schema_version=1,
+            payload_json=payload,
+            updated_at=datetime(2026, 9, 17, 14, 0, tzinfo=timezone.utc),
+            deleted_at=None,
+        ))
+        await db.commit()
+
+        rejected = await apply_push(db, actor, SyncBatch.model_validate({
+            "deviceID": "delivery-device-1",
+            "records": [record(
+                payload,
+                "delivery-orphan-update",
+                base_revision=11,
+            )],
+        }))
+
+        assert rejected.rejectedRecordIDs == ["delivery-orphan-update"]
+        assert await db.get(
+            CanonicalProjectChild,
+            ("org-1", "delivery_execution", "delivery-1"),
+        ) is None
+        stored = await db.get(
+            SyncEntity,
+            ("org-1", "delivery_execution", "delivery-1"),
+        )
+        assert stored is not None and stored.server_revision == 11
+        await clear_database(db)
+
+
+@pytest.mark.asyncio
+async def test_delivery_execution_rejects_canonical_row_without_generic_payload():
+    actor = principal(capabilities={"sync", "delivery.manage"})
+    async with SessionFactory() as db:
+        await clear_database(db)
+        await seed_approved_quotation(db, actor)
+
+        db.add(CanonicalProjectChild(
+            organization_id="org-1",
+            entity_type="delivery_execution",
+            entity_id="delivery-1",
+            project_id="project-1",
+        ))
+        await db.commit()
+
+        payload = delivery_payload(actor)
+        rejected = await apply_push(db, actor, SyncBatch.model_validate({
+            "deviceID": "delivery-device-1",
+            "records": [record(payload, "delivery-missing-payload")],
+        }))
+
+        assert rejected.rejectedRecordIDs == ["delivery-missing-payload"]
+        assert await db.get(
+            SyncEntity,
+            ("org-1", "delivery_execution", "delivery-1"),
+        ) is None
+        canonical = await db.get(
+            CanonicalProjectChild,
+            ("org-1", "delivery_execution", "delivery-1"),
+        )
+        assert canonical is not None and canonical.project_id == "project-1"
+        await clear_database(db)
+

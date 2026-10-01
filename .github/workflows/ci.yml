@@ -149,7 +149,7 @@ jobs:
           API_HOST=localhost
           API_IMAGE=vitrial-api:deployment-smoke
           CADDY_IMAGE=caddy:2-alpine
-          SERVICE_VERSION=0.2.0-ci
+          SERVICE_VERSION=0.3.0-ci
           DATABASE_URL=postgresql+asyncpg://vitrial:ci-postgres-secret-12345@postgres:5432/vitrial
           DATABASE_NULL_POOL=false
           S3_BUCKET=vitrial-evidence
