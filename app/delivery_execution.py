@@ -806,6 +806,17 @@ async def authorize_delivery_execution(
         CanonicalProjectChild,
         (principal.organization_id, DELIVERY_ENTITY_TYPE, entity_id),
     )
+    # Generic sync payload is never authorization evidence by itself. A delivery
+    # execution is canonical only when its payload and server-owned ownership row
+    # agree on existence; do not silently adopt or recreate either half.
+    if current is not None and child is None:
+        raise DeliveryExecutionRejected(
+            "existing delivery execution lacks canonical ownership"
+        )
+    if current is None and child is not None:
+        raise DeliveryExecutionRejected(
+            "delivery execution canonical ownership exists without canonical payload"
+        )
     if child is not None and child.project_id != project_id:
         raise DeliveryExecutionRejected(
             "delivery execution Project ownership is immutable"
