@@ -1,6 +1,7 @@
 from __future__ import annotations
 import base64
 import json
+import logging
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +16,7 @@ from app.delivery_execution import (
 )
 from app.evidence_gc import queue_blob_gc
 from app.idempotency import SyncMutationFingerprint, request_fingerprint
+from app.transient_retry import run_with_transient_retry, sqlstate_of
 from app.lifecycle import LifecycleRejected, validate_lifecycle_mutation
 from app.models import CanonicalItemChild, EvidenceBlob, Organization, SyncChangeLog, SyncEntity, SyncMutation
 from app.observability import correlation_ref, log_event
@@ -173,6 +175,39 @@ def _outcome_event(
 
 
 async def apply_push(db: AsyncSession, principal: Principal, batch: SyncBatch) -> SyncResult:
+    """Apply a push batch, replaying it if PostgreSQL aborts the transaction.
+
+    PostgreSQL can abort a transaction with `40001 serialization_failure` or
+    `40P01 deadlock_detected` under concurrency, and both mean "replay me". Today
+    that reaches the client as an unhandled 500 for a condition that resolves on the
+    next attempt.
+
+    Replay is safe because this operation is idempotent by construction:
+    `SyncChangeLog` has a `UniqueConstraint(organization_id, client_mutation_id)`, and
+    a replayed mutation is answered with the original result
+    (`reason="idempotent_replay"`) rather than applied twice. All per-attempt state
+    below is local to `_apply_push_once`, so a retry re-does the batch cleanly rather
+    than resuming a half-applied one.
+
+    Retries are logged at warning level with the SQLSTATE. A burst of these is the
+    signal that organization-level write serialization is under contention, which is
+    a capacity concern the plan tracks separately -- not something to hide behind a
+    silent retry.
+    """
+    return await run_with_transient_retry(
+        db,
+        lambda: _apply_push_once(db, principal, batch),
+        on_retry=lambda exc, attempt: log_event(
+            "sync.push_replayed",
+            level=logging.WARNING,
+            sqlstate=sqlstate_of(exc),
+            attempt=attempt,
+            organizationRef=correlation_ref(principal.organization_id),
+        ),
+    )
+
+
+async def _apply_push_once(db: AsyncSession, principal: Principal, batch: SyncBatch) -> SyncResult:
     if "sync" not in principal.capabilities:
         raise PermissionError("sync capability required")
 
