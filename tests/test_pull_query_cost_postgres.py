@@ -72,26 +72,53 @@ def principal() -> Principal:
 
 
 async def seed_changes(db: AsyncSession) -> None:
-    """Create change-log rows for entities that do not resolve.
+    """Create visible item changes that exercise the full pull loop.
 
-    Invisible rows are sufficient to measure the per-change query cost, and they are
-    also the *worst* case for the N+1: every change is examined and none is skipped
-    early, so nothing terminates the walk before the page is exhausted.
+    An invisible row is *not* a worst case here: `pull_since` continues immediately
+    after `record_is_visible` returns false, so it never performs the final
+    `SyncEntity` payload fetch. To measure the N+1 we need records that are actually
+    visible and therefore traverse both authorization lookup and payload fetch.
 
-    Column shapes are copied from `apply_push` rather than guessed, since this test
-    runs only in the integration job where a wrong column is an error nobody sees
-    locally.
+    Each item gets its own canonical Project so SQLAlchemy's identity map cannot make
+    repeated Project lookups disappear after the first record and flatter the count.
     """
-    from app.models import Organization, SyncChangeLog, SyncEntity
+    from app.models import (
+        CanonicalCustomer,
+        CanonicalItem,
+        CanonicalProject,
+        Organization,
+        SyncChangeLog,
+        SyncEntity,
+    )
 
     db.add(Organization(id="org-pull-cost", name="Pull Cost", authorization_revision=1))
     await db.flush()
+    db.add(CanonicalCustomer(
+        organization_id="org-pull-cost",
+        customer_id="customer-pull-cost",
+    ))
+    await db.flush()
+
     for index in range(CHANGES):
+        project_id = f"project-pull-cost-{index}"
+        item_id = f"item-pull-cost-{index}"
+        db.add(CanonicalProject(
+            organization_id="org-pull-cost",
+            project_id=project_id,
+            customer_id="customer-pull-cost",
+        ))
+        await db.flush()
+        db.add(CanonicalItem(
+            organization_id="org-pull-cost",
+            item_id=item_id,
+            project_id=project_id,
+            project_sector_id=None,
+        ))
         db.add(
             SyncChangeLog(
                 organization_id="org-pull-cost",
                 entity_type="item",
-                entity_id=f"missing-item-{index}",
+                entity_id=item_id,
                 server_revision=1,
                 client_mutation_id=f"m-{index}",
                 operation="upsert",
@@ -101,13 +128,10 @@ async def seed_changes(db: AsyncSession) -> None:
             SyncEntity(
                 organization_id="org-pull-cost",
                 entity_type="item",
-                entity_id=f"missing-item-{index}",
+                entity_id=item_id,
                 server_revision=1,
                 schema_version=1,
-                payload_json={"id": f"missing-item-{index}"},
-                # `SyncEntity.updated_at` is NOT NULL with no default, so a direct
-                # construction must set it. The integration job is the only place
-                # this omission would have surfaced.
+                payload_json={"id": item_id, "projectID": project_id},
                 updated_at=datetime(2026, 9, 17, 14, 0, tzinfo=timezone.utc),
             )
         )
@@ -141,8 +165,12 @@ async def test_pull_query_count_grows_with_the_page():
 
     with _QueryCounter(engine) as counter:
         async with SessionFactory() as db:
-            await pull_since(db, principal(), "seq:0")
+            result = await pull_since(db, principal(), "seq:0")
 
+    assert len(result.records) == CHANGES, (
+        "measurement fixture must remain fully visible or the payload-fetch half of "
+        "the N+1 will disappear from the count"
+    )
     per_change = counter.count / CHANGES
     print(
         f"\npull page of {CHANGES} changes issued {counter.count} queries "
