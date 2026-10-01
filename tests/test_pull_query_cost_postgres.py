@@ -1,13 +1,17 @@
 """Query cost of a sync pull.
 
 The 0.3.0 plan lists "remove/bound pull N+1 entity/visibility queries" under API
-bounded-service hardening. This file does not fix that; it **measures** it, because the
-fix is an authorization refactor and authorization should not be refactured on the
-strength of a count derived by reading code.
+bounded-service hardening. This file originally **measured** the N+1 rather than
+fixing it, because the fix was an authorization refactor and authorization should not
+be refactured on the strength of a count derived by reading code.
 
-What the count shows
---------------------
-`pull_since` walks up to `MAX_SYNC_PULL_SCAN_CHANGES` changes and, per change, calls
+It is now fixed: `app/pull_prefetch.py` resolves a page in a fixed number of
+set-based queries. This file is the guard that it stays fixed, and its bound was
+tightened from 8 queries/change to 4 when the prefetch landed.
+
+What the count showed, before the fix
+-------------------------------------
+`pull_since` walked up to `MAX_SYNC_PULL_SCAN_CHANGES` changes and, per change, called
 `record_is_visible` (1-3 `db.get` calls depending on entity type) plus a
 `db.get(SyncEntity, ...)` for the payload. Per page that is:
 
@@ -21,8 +25,8 @@ What the count shows
 | item child    | 3                  | 1              | 4     |
 | delivery      | 1                  | 1              | 2     |
 
-So a full page is 1,000-2,000 sequential round trips, and it scales linearly with
-page size.
+So a full page was 1,000-2,000 sequential round trips, scaling linearly with page
+size. After the batched prefetch it is a flat ~8 queries regardless of page size.
 
 Running here
 ------------
@@ -48,10 +52,18 @@ pytestmark = pytest.mark.skipif(
     reason="requires migrated PostgreSQL integration database",
 )
 
-# Generous on purpose. This is a *regression* bound that fails loudly if the shape
-# changes, not a performance target -- the actual optimisation is tracked separately
-# and this number should fall when it lands.
-MAX_QUERIES_PER_CHANGE = 8
+# The bound when this file was written, before the batched prefetch landed. Kept so a
+# regression to the old shape is recognisable rather than merely "slow".
+LEGACY_MAX_QUERIES_PER_CHANGE = 8
+
+# After the batched prefetch, the count is a fixed handful of set-based queries that
+# does not grow with the page: 1 change-log page select plus at most 7 batch loads.
+# 12 for a 12-change page leaves headroom for a new set-based load while still
+# failing loudly if anything reintroduces a per-record lookup.
+#
+# This is the tightening the earlier commit said would have to happen with the fix.
+# A regression bound nobody ever tightens stops being a guard and becomes decoration.
+MAX_QUERIES_PER_CHANGE = 4
 
 CHANGES = 12
 
@@ -156,8 +168,14 @@ class _QueryCounter:
 
 
 @pytest.mark.asyncio
-async def test_pull_query_count_grows_with_the_page():
-    """Records the actual query count, so the N+1 is evidence rather than assertion."""
+async def test_pull_query_count_does_not_grow_with_the_page():
+    """The query count must be independent of page size.
+
+    Was ``grows_with_the_page``, which documented the N+1. The assertion is now
+    inverted: the batched prefetch in ``app/pull_prefetch.py`` resolves the whole
+    page in a fixed number of set-based queries, so a count that scales with the
+    number of changes means a per-record lookup has been reintroduced.
+    """
     from app.db import engine
 
     async with SessionFactory() as db:
@@ -180,7 +198,10 @@ async def test_pull_query_count_grows_with_the_page():
     )
 
     assert per_change <= MAX_QUERIES_PER_CHANGE, (
-        f"pull issued {per_change:.1f} queries per change, above the bound of "
-        f"{MAX_QUERIES_PER_CHANGE}. The per-change N+1 in record_is_visible plus the "
-        "SyncEntity fetch is the expected cause; the fix is a batched prefetch."
+        f"pull issued {per_change:.1f} queries per change ({counter.count} total for "
+        f"{CHANGES} changes), above the bound of {MAX_QUERIES_PER_CHANGE}. After the "
+        "batched prefetch the count should be flat in page size, so a per-change "
+        "factor here means a per-record lookup has been reintroduced -- most likely a "
+        "db.get() added to the loop in pull_since instead of reading from the "
+        "prefetched page context."
     )
