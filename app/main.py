@@ -21,6 +21,7 @@ from app.auth_session_routes import router as auth_session_router
 from app.db import session_scope
 from app.evidence import put_blob
 from app.models import EvidenceBlob
+from app.request_size import RequestSizeLimitMiddleware
 from app.rate_limit import (
     client_key_for,
     limiter_for,
@@ -346,3 +347,16 @@ async def admin_revoke_session(
     db: AsyncSession = Depends(session_scope),
 ) -> AdminSessionRevokeResponse:
     return await revoke_session(db, sessionID, request)
+
+
+# The whole-request byte guard is registered last so it runs outermost of the user
+# middleware, ahead of correlation and rate limiting.
+#
+# `add_middleware` rather than reassigning `app` on purpose: wrapping the ASGI
+# application in a plain object hides `app.openapi()`, which the pinned-contract tests
+# assert against. Registering it keeps `app` a FastAPI instance.
+#
+# It must be a pure ASGI middleware rather than `@app.middleware("http")`, because
+# the decorator form builds a new downstream request and cannot intercept the body
+# stream. See app/request_size.py.
+app.add_middleware(RequestSizeLimitMiddleware)
