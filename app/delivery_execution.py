@@ -871,6 +871,17 @@ async def delivery_execution_is_visible(
     *,
     entity_id: str,
 ) -> bool:
+    entity = await db.get(
+        SyncEntity,
+        (principal.organization_id, DELIVERY_ENTITY_TYPE, entity_id),
+    )
+    if (
+        entity is None
+        or entity.deleted_at is not None
+        or not isinstance(entity.payload_json, dict)
+    ):
+        return False
+
     child = await db.get(
         CanonicalProjectChild,
         (principal.organization_id, DELIVERY_ENTITY_TYPE, entity_id),

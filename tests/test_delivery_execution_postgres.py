@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import delete
 
 from app.auth import Principal
+from app.delivery_execution import delivery_execution_is_visible
 from app.db import SessionFactory
 from app.idempotency import SyncMutationFingerprint
 from app.models import (
@@ -428,5 +429,10 @@ async def test_delivery_execution_rejects_tombstoned_ownership_with_active_paylo
             ("org-1", "delivery_execution", "delivery-1"),
         )
         assert canonical is not None and canonical.deleted_at == tombstoned_at
+        assert await delivery_execution_is_visible(
+            db,
+            actor,
+            entity_id="delivery-1",
+        ) is False
         await clear_database(db)
 
