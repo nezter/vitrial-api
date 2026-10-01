@@ -24,7 +24,7 @@ Why retry is safe here
 Only for **idempotent** units of work, and the sync push is idempotent by
 construction rather than by luck:
 
-* `SyncChangeLog` carries `UniqueConstraint("organization_id", "client_mutation_id")`.
+* `SyncMutation` carries `UniqueConstraint("organization_id", "client_mutation_id")`.
 * A replay of an already-committed mutation is detected and answered with the
   original result (`reason="idempotent_replay"`), rather than being applied twice.
 
@@ -40,7 +40,8 @@ What is deliberately **not** retried
 * Any error not explicitly listed. An unknown SQLSTATE is treated as permanent,
   because retrying a permanent failure converts a fast, clear error into a slow,
   misleading one.
-* ``40002`` statement_timeout. It is transient in the sense that the query stops, but
+* ``57014`` query_canceled. PostgreSQL reports a server-side statement timeout
+  through this SQLSTATE. It is transient in the sense that the query stops, but
   retrying it by default would multiply load precisely when the database is already
   struggling. It is available as an opt-in for callers that know their work is cheap
   to re-run.
@@ -62,7 +63,8 @@ T = TypeVar("T")
 SERIALIZATION_FAILURE = "40001"
 DEADLOCK_DETECTED = "40P01"
 LOCK_NOT_AVAILABLE = "55P03"
-STATEMENT_TIMEOUT = "40002"
+# PostgreSQL reports server-side statement_timeout as query_canceled (57014).
+STATEMENT_TIMEOUT = "57014"
 
 # Defaults are deliberately small. A serialization failure is usually resolved by
 # simply being next in line, so a long backoff mostly adds latency to the winner.
@@ -77,12 +79,14 @@ def sqlstate_of(exc: BaseException) -> str | None:
     """Extract the SQLSTATE from a SQLAlchemy DBAPI error, if there is one."""
     if not isinstance(exc, DBAPIError):
         return None
-    code = getattr(getattr(exc, "orig", None), "sqlstate", None)
+    orig = getattr(exc, "orig", None)
+    code = getattr(orig, "sqlstate", None)
     if code:
         return str(code)
-    # asyncpg exposes pgcode; SQLAlchemy's asyncpg dialect usually maps it to
-    # sqlstate, but fall back so a dialect change cannot silently disable retry.
-    return str(code) if code is not None else None
+    # asyncpg/DBAPI adapters may expose pgcode instead. Keep the fallback real so
+    # a dialect or adapter change cannot silently disable retry classification.
+    code = getattr(orig, "pgcode", None)
+    return str(code) if code else None
 
 
 def is_transient(exc: BaseException, *, include_timeout: bool = False) -> bool:

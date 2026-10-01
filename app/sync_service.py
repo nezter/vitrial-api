@@ -183,7 +183,7 @@ async def apply_push(db: AsyncSession, principal: Principal, batch: SyncBatch) -
     next attempt.
 
     Replay is safe because this operation is idempotent by construction:
-    `SyncChangeLog` has a `UniqueConstraint(organization_id, client_mutation_id)`, and
+    `SyncMutation` has a `UniqueConstraint(organization_id, client_mutation_id)`, and
     a replayed mutation is answered with the original result
     (`reason="idempotent_replay"`) rather than applied twice. All per-attempt state
     below is local to `_apply_push_once`, so a retry re-does the batch cleanly rather

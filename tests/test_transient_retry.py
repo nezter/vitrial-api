@@ -26,6 +26,11 @@ class _FakeOrig:
         self.sqlstate = sqlstate
 
 
+class _FakePgcodeOrig:
+    def __init__(self, pgcode: str) -> None:
+        self.pgcode = pgcode
+
+
 def _dbapi(sqlstate: str) -> OperationalError:
     return OperationalError("stmt", {}, _FakeOrig(sqlstate))
 
@@ -78,6 +83,18 @@ def test_exception_without_sqlstate_is_not_transient():
         pass
 
     assert is_transient(DBAPIError("stmt", {}, Exception("boom"))) is False
+
+
+def test_pgcode_fallback_preserves_retry_classification():
+    error = OperationalError("stmt", {}, _FakePgcodeOrig(SERIALIZATION_FAILURE))
+    assert sqlstate_of(error) == SERIALIZATION_FAILURE
+    assert is_transient(error) is True
+
+
+def test_statement_timeout_uses_postgresql_query_canceled_sqlstate():
+    assert STATEMENT_TIMEOUT == "57014"
+    assert is_transient(_dbapi("40002"), include_timeout=True) is False
+    assert is_transient(_dbapi(STATEMENT_TIMEOUT), include_timeout=True) is True
 
 
 # ------------------------------------------------------------------------- retry
