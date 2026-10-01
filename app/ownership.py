@@ -974,6 +974,31 @@ async def record_is_visible(
     entity_type: str,
     entity_id: str,
 ) -> bool:
+    """Whether `principal` may read this record during a pull.
+
+    Deliberately reads no `deleted_at` on any branch, so a soft-deleted record is
+    still delivered to an in-scope principal. **This is intentional. Do not add a
+    `deleted_at` check here without reading this first.**
+
+    The client cannot infer a deletion from a record's absence. In
+    `Sources/VitrialAluminiosKit/SyncConflictResolution.swift` the rule is stated as
+    "Tombstones are handled as explicit delete decisions and never inferred from
+    absence", and absence is not evidence here: a record beyond the page window looks
+    absent, as does one the principal cannot see, as does one rejected for a missing
+    payload. The tombstone has to be *delivered*, carrying `deletedAt`, for the client
+    to convert it into a delete decision. Filtering soft-deleted rows out of the pull
+    would make every server-side deletion permanently invisible to the client -- the
+    local copy would never be removed and nothing would report the divergence.
+
+    `delivery_execution_is_visible` is the one place that does check `deleted_at`, and
+    that is also deliberate: a delivery execution is a state machine, and a tombstoned
+    one re-entering the advance path would be a state violation rather than a stale
+    record. Different question, different answer.
+
+    `tests/test_soft_delete_visibility_probe.py` pins the current behaviour for all six
+    generic entity types. If it goes red, that is a reviewed authorization change, not
+    a drive-by fix.
+    """
     scope = EffectiveScope.from_principal(principal)
     if entity_type == "customer":
         customer = await db.get(CanonicalCustomer, (principal.organization_id, entity_id))

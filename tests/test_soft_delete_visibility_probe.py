@@ -166,8 +166,15 @@ async def test_the_write_path_does_treat_soft_deletes_as_absent():
         "the asymmetry described here no longer exists"
     )
 
+    # Check the *code*, not the docstring. The docstring necessarily names
+    # `deleted_at` in order to explain why the function must not read it, so a
+    # substring test over the whole source now fails for the wrong reason -- which is
+    # exactly the mistake of asserting on a name rather than on behaviour.
     body = inspect.getsource(record_is_visible)
-    assert "deleted_at" not in body, (
+    fence = body.find(chr(34) * 3)
+    end = body.find(chr(34) * 3, fence + 3)
+    code = body[end + 3:] if fence != -1 and end != -1 else body
+    assert "deleted_at" not in code, (
         "record_is_visible now reads deleted_at. If that was intentional, the "
         "assertions in this file are wrong and the behaviour change needs review; "
         "if it was not, this is a regression."
