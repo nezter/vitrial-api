@@ -39,6 +39,8 @@ class Snapshot:
     pool_budget: int | None
     orphan_payload_rows: int
     orphan_ownership_rows: int
+    tombstoned_payload_rows: int
+    tombstoned_ownership_rows: int
     object_storage: str
 
 
@@ -52,6 +54,10 @@ def evaluate(snapshot: Snapshot) -> list[str]:
         errors.append("delivery_execution payload rows exist without canonical ownership")
     if snapshot.orphan_ownership_rows:
         errors.append("delivery_execution ownership rows exist without payload rows")
+    if snapshot.tombstoned_payload_rows:
+        errors.append("tombstoned delivery_execution payload rows exist")
+    if snapshot.tombstoned_ownership_rows:
+        errors.append("tombstoned delivery_execution ownership rows exist")
     if snapshot.object_storage != "ok":
         errors.append("object storage is unavailable")
     return errors
@@ -95,6 +101,18 @@ async def collect_snapshot() -> Snapshot:
             WHERE c.entity_type = 'delivery_execution'
               AND e.entity_id IS NULL
         """)))
+        tombstoned_payload_rows = int(await connection.scalar(text("""
+            SELECT count(*)
+            FROM sync_entities
+            WHERE entity_type = 'delivery_execution'
+              AND deleted_at IS NOT NULL
+        """)))
+        tombstoned_ownership_rows = int(await connection.scalar(text("""
+            SELECT count(*)
+            FROM canonical_project_children
+            WHERE entity_type = 'delivery_execution'
+              AND deleted_at IS NOT NULL
+        """)))
 
     try:
         await probe_storage()
@@ -114,6 +132,8 @@ async def collect_snapshot() -> Snapshot:
         pool_budget=pool_budget,
         orphan_payload_rows=orphan_payload_rows,
         orphan_ownership_rows=orphan_ownership_rows,
+        tombstoned_payload_rows=tombstoned_payload_rows,
+        tombstoned_ownership_rows=tombstoned_ownership_rows,
         object_storage=object_storage,
     )
 
@@ -147,6 +167,8 @@ async def run() -> int:
         "deliveryExecution": {
             "payloadRowsWithoutOwnership": snapshot.orphan_payload_rows,
             "ownershipRowsWithoutPayload": snapshot.orphan_ownership_rows,
+            "tombstonedPayloadRows": snapshot.tombstoned_payload_rows,
+            "tombstonedOwnershipRows": snapshot.tombstoned_ownership_rows,
         },
         "objectStorage": snapshot.object_storage,
         "durabilityClaimed": False,
