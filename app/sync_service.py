@@ -12,7 +12,6 @@ from app.delivery_execution import (
     DeliveryExecutionRejected,
     apply_delivery_execution_ownership,
     authorize_delivery_execution,
-    delivery_execution_is_visible,
 )
 from app.evidence_gc import queue_blob_gc
 from app.idempotency import SyncMutationFingerprint, request_fingerprint
@@ -20,13 +19,17 @@ from app.transient_retry import run_with_transient_retry, sqlstate_of
 from app.lifecycle import LifecycleRejected, validate_lifecycle_mutation
 from app.models import CanonicalItemChild, EvidenceBlob, Organization, SyncChangeLog, SyncEntity, SyncMutation
 from app.observability import correlation_ref, log_event
+from app.pull_prefetch import (
+    load_page_context,
+    resolve_delivery_visible,
+    resolve_visible,
+)
 from app.ownership import (
     AuthorizationRejected,
     EffectiveScope,
     apply_ownership_plan,
     authorize_record,
     mutation_sort_key,
-    record_is_visible,
 )
 from app.schemas import (
     MAX_SYNC_RECORDS,
@@ -462,28 +465,31 @@ async def pull_since(db: AsyncSession, principal: Principal, cursor: str | None)
     # delivered, so leaving it unconsumed would stall the cursor forever. A
     # change that IS deliverable but does not fit the page is NOT consumed, so
     # the next pull observes it again rather than skipping it.
+    # Ownership resolution for the whole page in a fixed number of queries, rather
+    # than 1-3 `db.get` calls per change. `resolve_visible` and
+    # `resolve_delivery_visible` are line-for-line twins of `record_is_visible` and
+    # `delivery_execution_is_visible`; `tests/test_pull_prefetch_equivalence.py`
+    # asserts the two agree, and the visible set is pinned independently by
+    # `tests/test_pull_visibility_matrix_postgres.py`.
+    page = await load_page_context(db, principal, changes)
+
     max_seq = start
     for change in changes:
         if change.entity_type == DELIVERY_ENTITY_TYPE:
-            visible = await delivery_execution_is_visible(
-                db,
-                principal,
-                entity_id=change.entity_id,
-            )
+            visible = resolve_delivery_visible(page, entity_id=change.entity_id)
         else:
-            visible = await record_is_visible(
-                db,
-                principal,
+            visible = resolve_visible(
+                page,
                 entity_type=change.entity_type,
                 entity_id=change.entity_id,
             )
         if not visible:
             max_seq = max(max_seq, change.sequence)
             continue
-        entity = await db.get(
-            SyncEntity,
-            (principal.organization_id, change.entity_type, change.entity_id),
-        )
+        # Already loaded by `load_page_context`. `if not entity` is kept rather than
+        # tightened to `is None`: an ORM instance is always truthy, but the original
+        # test was not, and the point of this change is to preserve behaviour.
+        entity = page.entities.get((change.entity_type, change.entity_id))
         if not entity:
             max_seq = max(max_seq, change.sequence)
             continue
