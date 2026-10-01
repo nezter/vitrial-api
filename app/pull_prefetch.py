@@ -85,7 +85,14 @@ class PageContext:
     entities: dict[tuple[str, str], SyncEntity] = field(default_factory=dict)
 
 
-async def _chunks(values: list, size: int = MAX_BATCH):
+def _chunks(values: list, size: int = MAX_BATCH):
+    """Split `values` into chunks of at most `size`.
+
+    A plain generator, deliberately: it does no I/O, and marking it `async` made it
+    an async generator that callers must `async for` rather than iterate. The
+    `await` on it in `_load_keyed` was only ever exercised against a real database,
+    so it passed locally and failed in the integration job.
+    """
     for start in range(0, len(values), size):
         yield values[start : start + size]
 
@@ -98,7 +105,7 @@ async def _load_keyed(db: AsyncSession, model, key_columns: list[str], keys: lis
     would match cross-product combinations that do not exist.
     """
     out: dict[tuple, object] = {}
-    for chunk in await _chunks(keys):
+    for chunk in _chunks(keys):
         predicate = tuple_(*[getattr(model, col) for col in key_columns]).in_(chunk)
         rows = (await db.scalars(select(model).where(predicate))).all()
         for row in rows:

@@ -18,6 +18,8 @@ caught.)
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from app.auth import Principal
@@ -333,6 +335,112 @@ async def test_delivery_twin_matches_including_deleted_at_hops():
         assert actual == expected, (
             f"{label}: batched={actual} original={expected}"
         )
+
+
+@pytest.mark.asyncio
+async def test_loader_runs_against_any_session_shaped_object():
+    """Drive the real loader with a stub session, so it is not database-only.
+
+    `load_page_context` was, until now, only ever executed against PostgreSQL -- which
+    is how an `await` on a non-awaitable survived every local run. `_chunks` was
+    declared `async` without doing any I/O, making it an async generator, and
+    `_load_keyed` awaited it. The integration job caught it; nothing local could,
+    because the equivalence tests call the resolvers directly and never load.
+
+    This test asserts the loader actually issues its queries, keys the rows it gets
+    back, and chunks an oversized key list -- all without a database.
+    """
+    from app.pull_prefetch import _chunks, _load_keyed, load_page_context
+
+    assert not inspect.isasyncgenfunction(_chunks), (
+        "_chunks does no I/O; marking it async makes it an async generator that "
+        "callers must `async for`, which is how the integration job found an await "
+        "on a non-awaitable"
+    )
+    assert list(_chunks([1, 2, 3, 4, 5], size=2)) == [[1, 2], [3, 4], [5]]
+
+    class Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class LoaderDB:
+        def __init__(self, rows_by_table):
+            self.rows_by_table = rows_by_table
+            self.statements: list[str] = []
+
+        async def scalars(self, statement):
+            self.statements.append(str(statement))
+            for model_name, rows in self.rows_by_table.items():
+                if model_name in str(statement):
+                    return Result(rows)
+            return Result([])
+
+    # One query per requested table, not one per key.
+    from app.models import CanonicalProject, CanonicalProjectSector
+
+    project_rows = [
+        Row(organization_id=ORG, project_id="proj-1", customer_id="cust-1"),
+        Row(organization_id=ORG, project_id="proj-2", customer_id="cust-1"),
+    ]
+    sector_rows = [
+        Row(organization_id=ORG, project_sector_id="sec-1", project_id="proj-1", sector_id="s")
+    ]
+    db = LoaderDB({"canonical_projects": project_rows, "canonical_project_sectors": sector_rows})
+
+    keys = [(ORG, f"proj-{i}") for i in range(1, 3)]
+    loaded = await _load_keyed(db, CanonicalProject, ["organization_id", "project_id"], keys)
+    assert set(loaded) == set(keys), "rows must be keyed by the requested composite key"
+    assert len(db.statements) == 1, "one query for the whole key list, not one per key"
+
+    # And the composite-IN shape, which is what avoids matching cross-product
+    # combinations that do not exist.
+    assert "IN" in db.statements[0].upper()
+
+    # An oversized key list must chunk rather than issue one enormous IN list.
+    class CountingDB(LoaderDB):
+        async def scalars(self, statement):
+            self.statements.append(str(statement))
+            return Result([])
+
+    from app.pull_prefetch import MAX_BATCH
+
+    big = CountingDB({})
+    oversized = [(ORG, f"p{i}") for i in range(MAX_BATCH + 5)]
+    await _load_keyed(big, CanonicalProject, ["organization_id", "project_id"], oversized)
+    assert len(big.statements) == 2, (
+        f"expected 2 chunked queries for {len(oversized)} keys, got {len(big.statements)}"
+    )
+
+    # `load_page_context` end to end: one query per present type, never per record.
+    p = principal()
+
+    class Change:
+        def __init__(self, entity_type, entity_id):
+            self.entity_type = entity_type
+            self.entity_id = entity_id
+
+    page_db = LoaderDB({
+        "canonical_projects": project_rows,
+        "canonical_project_sectors": sector_rows,
+    })
+    changes = [
+        Change("project", "proj-1"),
+        Change("project", "proj-2"),
+        Change("project_sector", "sec-1"),
+        Change("project_sector", "sec-1"),
+    ]
+    ctx = await load_page_context(page_db, p, changes)
+    assert set(ctx.projects) == {"proj-1", "proj-2"}
+    assert set(ctx.sectors) == {"sec-1"}
+    # Four changes resolved by four queries at most, and the project query covers
+    # both direct projects and the sector's project in a single pass.
+    assert len(page_db.statements) <= 5, (
+        f"page context should be a fixed handful of queries, issued "
+        f"{len(page_db.statements)} for {len(changes)} changes"
+    )
 
 
 @pytest.mark.asyncio
