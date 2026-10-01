@@ -137,10 +137,19 @@ async def load_page_context(
     # visible. The original fetched only for visible records; over-fetching here is
     # one query total instead of up to one per visible record, and payload rows are
     # already selected by the change-log query's own page.
-    ctx.entities = await _load_keyed(
-        db, SyncEntity, ["organization_id", "entity_type", "entity_id"],
-        [(org, t, e) for t, ids in by_type.items() for e in ids],
-    )
+    # Keyed by (entity_type, entity_id) without the organization: the whole context
+    # is org-scoped, and the resolvers look up the 2-tuple form. `_load_keyed` returns
+    # keys shaped like its `key_columns`, so the organization has to be stripped
+    # here -- leaving it in made every lookup miss.
+    ctx.entities = {
+        (k[1], k[2]): v
+        for k, v in (
+            await _load_keyed(
+                db, SyncEntity, ["organization_id", "entity_type", "entity_id"],
+                [(org, t, e) for t, ids in by_type.items() for e in ids],
+            )
+        ).items()
+    }
 
     if by_type.get("customer"):
         rows = await _load_keyed(
@@ -149,12 +158,13 @@ async def load_page_context(
         )
         ctx.customers = {k[1]: v for k, v in rows.items()}
 
-    # `delivery_execution` is a project child, but the pull routes it through
-    # `delivery_execution_is_visible`, which needs its own `deleted_at` handling.
-    # It is loaded into `project_children` so the batched delivery resolver can use
-    # it, which is why the set difference here is empty by construction and left
-    # explicit rather than implicit.
-    project_child_types = PROJECT_CHILD_TYPES - {DELIVERY_ENTITY_TYPE}
+    # `delivery_execution` is a project child that the pull routes through
+    # `delivery_execution_is_visible` (extra `deleted_at` checks at each hop) rather
+    # than `record_is_visible`. It still has to be *loaded* here, because
+    # `resolve_delivery_visible` reads the child from this same map to make that
+    # decision. Excluding it -- which an earlier draft did, under a comment claiming
+    # the opposite -- silently made every delivery record invisible.
+    project_child_types = PROJECT_CHILD_TYPES
     project_child_ids = [
         (org, t, e) for t in project_child_types & by_type.keys() for e in by_type[t]
     ]

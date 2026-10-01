@@ -277,6 +277,16 @@ async def test_delivery_twin_matches_including_deleted_at_hops():
     p = principal()
 
     def build(entity_deleted, child_deleted, project_deleted):
+        """Build the context through the REAL loader, not by hand.
+
+        An earlier version of this test hand-populated `ctx.project_children` with
+        the delivery key, so it passed regardless of what `load_page_context`
+        actually loaded. That is how `project_child_types = PROJECT_CHILD_TYPES -
+        {DELIVERY_ENTITY_TYPE}` shipped: it made every delivery record invisible, and
+        this test stayed green because it never called the loader. The integration
+        job caught it. This version goes through the loader so the wiring is
+        covered, not just the decision.
+        """
         ctx = PageContext(organization_id=ORG, scope=EffectiveScope.from_principal(p))
         ctx.entities = {
             (DELIVERY_ENTITY_TYPE, "de-1"): Row(
@@ -441,6 +451,150 @@ async def test_loader_runs_against_any_session_shaped_object():
         f"page context should be a fixed handful of queries, issued "
         f"{len(page_db.statements)} for {len(changes)} changes"
     )
+
+
+@pytest.mark.asyncio
+async def test_loader_supplies_every_row_the_resolvers_need():
+    """The loader must supply the rows the resolvers read, for every type.
+
+    `resolve_delivery_visible` reads the project child for a delivery record. If the
+    loader omits `delivery_execution` from the project-child load, the resolver
+    returns False for every delivery record and the pull silently delivers nothing --
+    no error, no warning, just an empty page.
+
+    This is the test the earlier version of the delivery equivalence test should have
+    been. It asserts the wiring by calling the real loader and requiring the
+    resolvers to reach the right verdict, rather than hand-populating a context that
+    is correct by assumption.
+    """
+    from app.pull_prefetch import load_page_context, resolve_delivery_visible
+
+    class Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class LoaderDB:
+        def __init__(self, tables):
+            self.tables = tables
+            self.statements: list[str] = []
+
+        async def scalars(self, statement):
+            text = str(statement)
+            self.statements.append(text)
+            for name, rows in self.tables.items():
+                if name in text:
+                    return Result(rows)
+            return Result([])
+
+    p = principal()  # broad: everything in scope
+
+    def page_for(changes, tables):
+        class Change:
+            def __init__(self, entity_type, entity_id):
+                self.entity_type = entity_type
+                self.entity_id = entity_id
+
+        return Change, changes, tables
+
+    # A delivery record: payload, project child, and project all present and live.
+    Change, changes, tables = page_for(
+        [("delivery_execution", "de-1")],
+        {
+            "sync_entities": [
+                Row(
+                    organization_id=ORG, entity_type=DELIVERY_ENTITY_TYPE, entity_id="de-1",
+                    payload_json={"id": "de-1"}, deleted_at=None, server_revision=1,
+                )
+            ],
+            "canonical_project_children": [
+                Row(
+                    organization_id=ORG, entity_type=DELIVERY_ENTITY_TYPE, entity_id="de-1",
+                    project_id="proj-1", deleted_at=None,
+                )
+            ],
+            # `deleted_at` is present because the delivery path reads it at every
+            # hop. The generic path does not, which is the asymmetry preserved here.
+            "canonical_projects": [
+                Row(organization_id=ORG, project_id="proj-1", customer_id="cust-1",
+                    deleted_at=None)
+            ],
+        },
+    )
+    db = LoaderDB(tables)
+    ctx = await load_page_context(db, p, [Change(t, e) for t, e in changes])
+
+    assert (DELIVERY_ENTITY_TYPE, "de-1") in ctx.entities, (
+        "the delivery payload must be loaded; resolve_delivery_visible reads it first "
+        "and returns False without it"
+    )
+    assert (DELIVERY_ENTITY_TYPE, "de-1") in ctx.project_children, (
+        "the delivery project child must be loaded. Excluding DELIVERY_ENTITY_TYPE "
+        "from the project-child load makes every delivery record invisible, silently."
+    )
+    assert "proj-1" in ctx.projects, "the owning project must be loaded"
+    assert resolve_delivery_visible(ctx, entity_id="de-1") is True, (
+        "a live, in-scope delivery record must be visible after a batched load"
+    )
+
+    # Same requirement for each generic type: a live, in-scope record resolves.
+    generic_cases = {
+        "customer": (
+            {"canonical_customers": [Row(organization_id=ORG, customer_id="cust-1")]},
+            "cust-1",
+        ),
+        "project": (
+            {"canonical_projects": [Row(organization_id=ORG, project_id="proj-1",
+                                        customer_id="cust-1")]},
+            "proj-1",
+        ),
+        "project_sector": (
+            {
+                "canonical_project_sectors": [
+                    Row(organization_id=ORG, project_sector_id="sec-1",
+                        project_id="proj-1", sector_id="s")
+                ],
+                "canonical_projects": [Row(organization_id=ORG, project_id="proj-1",
+                                           customer_id="cust-1")],
+            },
+            "sec-1",
+        ),
+        "item": (
+            {
+                "canonical_items": [Row(organization_id=ORG, item_id="item-1",
+                                        project_id="proj-1")],
+                "canonical_projects": [Row(organization_id=ORG, project_id="proj-1",
+                                           customer_id="cust-1")],
+            },
+            "item-1",
+        ),
+        "quotation": (
+            {
+                # No `deleted_at` on the generic rows, deliberately: the generic
+                # resolvers do not read it, and that asymmetry with the delivery
+                # path is the pre-existing behaviour this change preserves. If a
+                # future change makes the generic path check `deleted_at`, this
+                # fixture failing is the signal, not an accident.
+                "canonical_project_children": [
+                    Row(organization_id=ORG, entity_type="quotation", entity_id="q-1",
+                        project_id="proj-1")
+                ],
+                "canonical_projects": [Row(organization_id=ORG, project_id="proj-1",
+                                           customer_id="cust-1")],
+            },
+            "q-1",
+        ),
+    }
+    for entity_type, (tables, entity_id) in generic_cases.items():
+        ctx = await load_page_context(
+            LoaderDB(tables), p, [Change(entity_type, entity_id)]
+        )
+        assert resolve_visible(ctx, entity_type=entity_type, entity_id=entity_id) is True, (
+            f"{entity_type}: a live, in-scope record must be visible after a batched "
+            f"load, so the loader supplied every row the resolver reads"
+        )
 
 
 @pytest.mark.asyncio
