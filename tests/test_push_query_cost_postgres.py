@@ -63,7 +63,10 @@ RECORDS = 8
 #   1x  INSERT fingerprint / change_log / entity
 #
 # 90 statements for 8 records = 11.2 each. MAX_SYNC_RECORDS is 200, so a full push is
-# ~2,250 round trips -- worse than the pull page that #53 brought down to ~167.
+# ~2,250 round trips. That is *worse* than the pull page, which measures 4 queries for
+# a full 500-change page (`test_pull_scale_postgres.py`). An earlier version of this
+# comment said "~167", extrapolated from a 12-change measurement by multiplying; the
+# real figure is 4, because a batched loader is flat in page size rather than linear.
 
 # Set from the measured value (11.2), rounded up. This is a tripwire that will fail
 # loudly the moment the per-record pattern changes shape, not a target: the batched
