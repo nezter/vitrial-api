@@ -80,6 +80,16 @@ jobs:
         run: |
           set -uo pipefail
           image="${S3_IMAGE:-rustfs/rustfs:latest}"
+          # The fallback tag is unpinned, so a new upstream release changes what CI is
+          # testing without any code change. `postgres:17` is pinned to a major for the
+          # same reason reproducibility matters here. Set the `S3_IMAGE` repository
+          # variable to a digest to make this explicit; until then, say so on every run
+          # so a surprise object-storage change is visible in the log rather than
+          # inferred later.
+          if [ "$image" = "rustfs/rustfs:latest" ]; then
+            echo "::warning::S3_IMAGE is unset; falling back to the unpinned $image. A new upstream release will change what CI tests."
+          fi
+          echo "object storage image: $image"
           if ! docker run -d --name vitrial-s3 \
             -p 9000:9000 \
             -e RUSTFS_ACCESS_KEY="$S3_ACCESS_KEY_ID" \
