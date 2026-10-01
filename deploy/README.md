@@ -114,6 +114,31 @@ silently under-deletes is visible in `systemctl status` rather than looking heal
 
 Add the unit's result to the release evidence list below once it is installed.
 
+
+## Read-only production provider preflight
+
+Before running a production migration, validate the exact provider boundary without
+changing provider state:
+
+```bash
+scripts/run_production_preflight.sh /etc/vitrial/vitrial.env
+```
+
+The runner validates the production env file, starts a one-shot container from the
+digest-pinned `API_IMAGE` with `--no-deps`, and performs only read operations. It
+checks:
+
+- the provider PostgreSQL revision equals the repository Alembic head;
+- the configured single-process pool budget is below provider `max_connections`;
+- no `delivery_execution` generic payload exists without server-owned canonical
+  ownership, and no ownership row exists without its payload;
+- the configured evidence bucket is reachable with the application's S3 credential.
+
+The output intentionally includes `"durabilityClaimed": false`. A green preflight
+does **not** prove PostgreSQL backups/PITR, S3 versioning, retention, replication, or
+restore behaviour. Those remain provider/operator evidence and must be retained
+separately before promotion.
+
 ## Backup and release evidence
 
 Before a real production migration, capture a provider-level PostgreSQL backup/snapshot and verify object-storage durability/versioning policy. Preserve the following release evidence:

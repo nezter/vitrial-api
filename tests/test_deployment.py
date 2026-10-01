@@ -128,3 +128,17 @@ def test_deploy_script_is_syntax_valid_and_verifies_runtime_release_identity():
     assert 'payload.get("objectStorage") != "ok"' in script
     assert '"https://${API_HOST}/api/v1/version"' in script
     assert 'payload.get("serviceVersion") != expected' in script
+
+def test_database_pool_tuning_is_forwarded_into_production_compose():
+    compose = (ROOT / "deploy" / "compose.production.yml").read_text(encoding="utf-8")
+    env_example = (ROOT / "deploy" / "env.production.example").read_text(encoding="utf-8")
+    for key in (
+        "DATABASE_POOL_SIZE",
+        "DATABASE_MAX_OVERFLOW",
+        "DATABASE_POOL_TIMEOUT_SECONDS",
+        "DATABASE_POOL_RECYCLE_SECONDS",
+        "DATABASE_STATEMENT_TIMEOUT_MS",
+    ):
+        assert f"{key}:" in compose
+        assert f"{key}=" in env_example
+
