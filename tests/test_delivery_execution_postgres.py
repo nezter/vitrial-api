@@ -6,7 +6,7 @@ import os
 from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, text
 
 from app.auth import Principal
 from app.delivery_execution import delivery_execution_is_visible
@@ -14,8 +14,11 @@ from app.db import SessionFactory
 from app.idempotency import SyncMutationFingerprint
 from app.models import (
     CanonicalCustomer,
+    CanonicalItem,
+    CanonicalItemChild,
     CanonicalProject,
     CanonicalProjectChild,
+    CanonicalProjectSector,
     Organization,
     SyncChangeLog,
     SyncEntity,
@@ -101,17 +104,38 @@ def delivery_payload(actor: Principal) -> dict:
 
 
 async def clear_database(db) -> None:
+    # Children before parents, with an explicit flush between the two groups.
+    #
+    # This helper used to omit `CanonicalItem`, `CanonicalItemChild` and
+    # `CanonicalProjectSector` entirely, and it appeared to work -- until another test
+    # file seeded those rows, left them behind, and this one then failed on clean `main`
+    # with `ForeignKeyViolationError: update or delete on table "canonical_projects"
+    # violates foreign key constraint "fk_canonical_item_project"`. Deleting a parent
+    # that a sibling test's child still references is the failure.
+    #
+    # The flush is load-bearing rather than tidier: SQLAlchemy coalesces queued DELETEs
+    # into a single flush, so issuing the child deletes and then the parent deletes
+    # without one still emits them together and the parent goes first. Splitting the
+    # loops is not enough.
     for model in (
         SyncMutationFingerprint,
         SyncChangeLog,
         SyncMutation,
         SyncEntity,
+        CanonicalItemChild,
+        CanonicalItem,
+        CanonicalProjectSector,
         CanonicalProjectChild,
-        CanonicalProject,
-        CanonicalCustomer,
-        Organization,
     ):
         await db.execute(delete(model))
+    await db.flush()
+    for model in (CanonicalProject, CanonicalCustomer, Organization):
+        await db.execute(delete(model))
+    # `sync_change_log.sequence` is a database-wide autoincrement primary key. Other
+    # integration files' clear helpers delete rows without resetting it, so a reused
+    # local database carries a drifted sequence and unrelated tests fail. CI provisions
+    # a fresh database and never sees this.
+    await db.execute(text("TRUNCATE sync_change_log RESTART IDENTITY CASCADE"))
     await db.commit()
 
 

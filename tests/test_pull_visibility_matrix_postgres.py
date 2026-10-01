@@ -260,6 +260,14 @@ async def clear(db) -> None:
     await db.execute(
         delete(CanonicalProjectChild).where(CanonicalProjectChild.organization_id == ORG)
     )
+    # The flush is load-bearing, not tidier. These DELETEs are issued in
+    # children-before-parents order, but SQLAlchemy coalesces them into a single flush,
+    # so the parent is emitted alongside the children and removed first. The result is
+    # `ForeignKeyViolationError: update or delete on table "canonical_projects" violates
+    # foreign key constraint "fk_canonical_project_child_project"` -- which appeared only
+    # when another integration file left a project child behind, so this helper looked
+    # fine for as long as it was the only writer in its organization.
+    await db.flush()
     await db.execute(
         delete(CanonicalProject).where(CanonicalProject.organization_id == ORG)
     )

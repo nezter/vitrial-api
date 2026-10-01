@@ -25,6 +25,7 @@ from app.idempotency import SyncMutationFingerprint
 from app.models import (
     CanonicalCustomer,
     CanonicalItem,
+    CanonicalItemChild,
     CanonicalProject,
     CanonicalProjectSector,
     Organization,
@@ -119,14 +120,32 @@ def record(index: int) -> SyncRecord:
 
 
 async def clear() -> None:
+    """Delete this file's rows, children before parents, in two flushed groups.
+
+    `CanonicalItemChild` was missing from the original list, so a sibling test that
+    seeded one under this organization left a child row behind and the parent deletes
+    below then failed on the item foreign key. The explicit flush is load-bearing:
+    SQLAlchemy coalesces queued DELETEs into one flush, so without it the parents are
+    emitted alongside the children and removed first.
+    """
     async with SessionFactory() as db:
         for model in (
             SyncMutationFingerprint, SyncChangeLog, SyncMutation, SyncEntity,
-            CanonicalItem, CanonicalProjectSector, CanonicalProject,
-            CanonicalCustomer, Organization,
+            CanonicalItemChild, CanonicalItem, CanonicalProjectSector,
         ):
-            await db.execute(delete(model).where(model.__table__.c.organization_id == "org-push-cost")
-                             if "organization_id" in model.__table__.c else delete(model).where(Organization.id == "org-push-cost"))
+            await db.execute(
+                delete(model).where(
+                    model.__table__.c.organization_id == "org-push-cost"
+                )
+            )
+        await db.flush()
+        for model in (CanonicalProject, CanonicalCustomer, Organization):
+            await db.execute(
+                delete(model).where(model.__table__.c.organization_id == "org-push-cost")
+                if "organization_id" in model.__table__.c
+                else delete(model).where(Organization.id == "org-push-cost")
+            )
+        await db.execute(text("TRUNCATE sync_change_log RESTART IDENTITY CASCADE"))
         await db.commit()
 
 
