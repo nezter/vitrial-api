@@ -332,3 +332,101 @@ async def test_delivery_execution_rejects_canonical_row_without_generic_payload(
         assert canonical is not None and canonical.project_id == "project-1"
         await clear_database(db)
 
+@pytest.mark.asyncio
+async def test_delivery_execution_rejects_historical_tombstone_resurrection():
+    actor = principal(capabilities={"sync", "delivery.manage"})
+    async with SessionFactory() as db:
+        await clear_database(db)
+        await seed_approved_quotation(db, actor)
+
+        tombstoned_at = datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
+        db.add(CanonicalProjectChild(
+            organization_id="org-1",
+            entity_type="delivery_execution",
+            entity_id="delivery-1",
+            project_id="project-1",
+            deleted_at=tombstoned_at,
+        ))
+        db.add(SyncEntity(
+            organization_id="org-1",
+            entity_type="delivery_execution",
+            entity_id="delivery-1",
+            server_revision=11,
+            schema_version=1,
+            payload_json=None,
+            updated_at=tombstoned_at,
+            deleted_at=tombstoned_at,
+        ))
+        await db.commit()
+
+        payload = delivery_payload(actor)
+        rejected = await apply_push(db, actor, SyncBatch.model_validate({
+            "deviceID": "delivery-device-1",
+            "records": [record(
+                payload,
+                "delivery-resurrection",
+                base_revision=11,
+            )],
+        }))
+
+        assert rejected.rejectedRecordIDs == ["delivery-resurrection"]
+        canonical = await db.get(
+            CanonicalProjectChild,
+            ("org-1", "delivery_execution", "delivery-1"),
+        )
+        stored = await db.get(
+            SyncEntity,
+            ("org-1", "delivery_execution", "delivery-1"),
+        )
+        assert canonical is not None and canonical.deleted_at == tombstoned_at
+        assert stored is not None and stored.deleted_at == tombstoned_at
+        assert stored.payload_json is None
+        assert stored.server_revision == 11
+        await clear_database(db)
+
+
+@pytest.mark.asyncio
+async def test_delivery_execution_rejects_tombstoned_ownership_with_active_payload():
+    actor = principal(capabilities={"sync", "delivery.manage"})
+    async with SessionFactory() as db:
+        await clear_database(db)
+        await seed_approved_quotation(db, actor)
+
+        tombstoned_at = datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
+        payload = delivery_payload(actor)
+        db.add(CanonicalProjectChild(
+            organization_id="org-1",
+            entity_type="delivery_execution",
+            entity_id="delivery-1",
+            project_id="project-1",
+            deleted_at=tombstoned_at,
+        ))
+        db.add(SyncEntity(
+            organization_id="org-1",
+            entity_type="delivery_execution",
+            entity_id="delivery-1",
+            server_revision=11,
+            schema_version=1,
+            payload_json=payload,
+            updated_at=datetime(2026, 9, 17, 14, 0, tzinfo=timezone.utc),
+            deleted_at=None,
+        ))
+        await db.commit()
+
+        rejected = await apply_push(db, actor, SyncBatch.model_validate({
+            "deviceID": "delivery-device-1",
+            "records": [record(
+                payload,
+                "delivery-tombstoned-owner",
+                base_revision=11,
+            )],
+        }))
+
+        assert rejected.rejectedRecordIDs == ["delivery-tombstoned-owner"]
+        canonical = await db.get(
+            CanonicalProjectChild,
+            ("org-1", "delivery_execution", "delivery-1"),
+        )
+        assert canonical is not None and canonical.deleted_at == tombstoned_at
+        await clear_database(db)
+
