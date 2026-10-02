@@ -18,6 +18,18 @@ repos: [vitrial-api]
 suite: **293 passed, 1 skipped** (S3, needs Docker). No open PRs. Three open issues: #28
 (the real 0.3.0 spec), #30 (MinIO→RustFS, landed but box still open), #2 (effectively done).
 
+## UBS status — loop closed 2026-10-02
+
+Real fixes shipped: 6 `security-assert` criticals in `ownership.py` (asserts →
+`AuthorizationRejected`), and the blocking read on `LocalObjectStore.stream` now uses
+`asyncio.to_thread`. `ubs --only=python` (with `.ubsignore` scoping) dropped criticals
+48→16, warnings 65→3. The residual 16/3 are documented false positives for this codebase
+and are recorded in the tracker so the loop has a defined floor, not an infinite one —
+running `ubs` to literally 0 means distorting `auth.py`'s `token_hash ==` lookup,
+`ownership.py`'s int `revision !=` comparison, or the validated `X-Request-ID`, all of
+which would be a regression. Next session: treat any *new* class of warning as a real-fix
+prompt, and do not re-litigate the false-positive set.
+
 ## Good first contribution — W1 (`VITR-V001` guard-layer dead rules), top of the tracker queue
 
 Dead guard prefixes: `request_size.py:79-82` has `/api/v1/sync/v2/push`, `/api/v1/admin`,
