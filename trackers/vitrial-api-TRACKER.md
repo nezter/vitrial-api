@@ -200,7 +200,31 @@ Pick top-down. Each task has: goal, files, tests to run, done-when. Run the suit
 ### Smaller / hygiene
 - [ ] Close issue #30's checkbox (MinIO→RustFS already landed); reconcile #2/#28 in GitHub.
 - [ ] The four guard-prefix entries are a Rule-5 violation — after W1, add a lint rule so a
-      matching-by-class failure fails, per `AGENTS.md` "measure, don't assert".
+      matching-by-class failure fails, per `AGENTS.md` "measure, don't assert". (Done: W1 + guard lint)
+
+## UBS loop status — `review/vitrial-api-hardening`
+
+`ubs . --only=python` (with `.ubsignore` scoping out `tests/`, `requirements-lock.txt`,
+caches, `migrations/versions/`):
+
+| Pass | files | critical | warning | info |
+|---|---|---|---|---|
+| before fixes (all files) | 109 | 48 | 65 | 693 |
+| after UBS fixes, full scan | 109 | 42 | 65 | 688 |
+| after `.ubsignore` scope | 44 | 16 | 3 | 305 |
+
+Fixed: 6 `security-assert` criticals in `ownership.py` (asserts → explicit
+`AuthorizationRejected`); `py.async.blocking-call` on `LocalObjectStore.stream` (chunks via
+`asyncio.to_thread`).
+
+Residual criticals are **validated false positives** for this codebase, not fixable without
+distorting the production path: `python.ctcompare.secret_eq` (`access_token_hash ==` is a DB
+lookup, not an in-process comparison; `authorization_revision !=` is an int),
+`py.security.ldap-injection` on `db.add(...)` (not a directory sink),
+`py.security.header-injection` on `X-Request-ID`/`X-Content-SHA256` (both are UUID-/hex-validated
+before use), and the lock-file `==` float comparisons. The "next session" page for keeping this
+loop alive: every new class of warning from a silent assert or a blocking call inside async gets a
+real fix; noisy-rules go in `.ubsignore` or the `skip=` list, never a code workaround.
 
 ## What is done that is spec'd in #28 (leave checked only if true)
 
