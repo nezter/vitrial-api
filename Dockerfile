@@ -24,4 +24,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
     CMD ["python", "scripts/probe_dependencies.py", "--quiet"]
 
+# NOTE on --forwarded-allow-ips: in production this API container publishes NO host port;
+# its only TCP peer is the Caddy ingress on the internal network, so `*` is reachable only
+# from Caddy. The deployment trust boundary is Caddyfile: it now overwrites
+# X-Forwarded-For with {remote_host} rather than appending to a client-supplied value.
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]

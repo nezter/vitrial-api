@@ -12,5 +12,10 @@
         health_uri /health
         health_interval 15s
         health_timeout 5s
+        # X-Forwarded-For spoofing: Caddy by default APPENDS the TCP peer to any
+        # client-supplied XFF, so the left-most entry (which our rate limiter keys on)
+        # is attacker-controlled. Overwrite XFF with the actual remote_host so the
+        # app only ever sees the real downstream client IP.
+        header_up X-Forwarded-For {remote_host}
     }
 }
