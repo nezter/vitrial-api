@@ -76,10 +76,9 @@ MIB = 1024 * 1024
 # (path prefix, default limit). Longest matching prefix wins.
 DEFAULT_PATH_LIMITS: tuple[tuple[str, int], ...] = (
     ("/api/v1/auth/pair", 16 * 1024),
-    ("/api/v1/auth/refresh", 16 * 1024),
     ("/api/v1/sync/push", 4 * MIB),
-    ("/api/v1/sync/v2/push", 4 * MIB),
-    ("/api/v1/admin", 64 * 1024),
+    ("/api/v2/sync/push", 4 * MIB),
+    ("/internal/admin/v1", 64 * 1024),
 )
 
 

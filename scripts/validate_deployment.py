@@ -76,10 +76,14 @@ def validate(args: argparse.Namespace) -> tuple[list[str], dict[str, object]]:
     if api_image:
         if looks_placeholder(api_image):
             errors.append("API_IMAGE still contains a placeholder")
-        if "@sha256:" not in api_image and not args.allow_mutable_images:
+        # Digest is mandatory in production; acceptance/smoke may use tags via --allow-mutable-images.
+        if "@sha256:" not in api_image and args.mode == "production" and not args.allow_mutable_images:
             errors.append("API_IMAGE must be pinned by sha256 digest")
-    if caddy_image.endswith(":latest") and not args.allow_mutable_images:
-        errors.append("CADDY_IMAGE must not use :latest")
+    if caddy_image:
+        if args.mode == "production" and "@sha256:" not in caddy_image and not args.allow_mutable_images:
+            errors.append("CADDY_IMAGE must be pinned by sha256 digest")
+        elif caddy_image.endswith(":latest") and not args.allow_mutable_images:
+            errors.append("CADDY_IMAGE must not use :latest")
 
     if database_url and not database_url.startswith("postgresql+asyncpg://"):
         errors.append("DATABASE_URL must use postgresql+asyncpg://")
@@ -112,8 +116,11 @@ def validate(args: argparse.Namespace) -> tuple[list[str], dict[str, object]]:
     if args.mode == "acceptance":
         for key in ("POSTGRES_IMAGE", "S3_IMAGE"):
             image = require(values, key, errors)
-            if image.endswith(":latest") and not args.allow_mutable_images:
-                errors.append(f"{key} must not use :latest")
+            if image:
+                if args.mode == "production" and "@sha256:" not in image and not args.allow_mutable_images:
+                    errors.append(f"{key} must be pinned by sha256 digest")
+                elif image.endswith(":latest") and not args.allow_mutable_images:
+                    errors.append(f"{key} must not use :latest")
         for key in ("POSTGRES_PASSWORD", "S3_ROOT_USER", "S3_ROOT_PASSWORD"):
             secret = require(values, key, errors)
             if secret and (len(secret) < 16 or looks_placeholder(secret)):

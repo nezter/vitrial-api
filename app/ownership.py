@@ -610,7 +610,8 @@ async def authorize_record(
 
         if entity_type in {"configuration", "configuration_version"} and not deleting:
             configuration = payload if entity_type == "configuration" else payload.get("configuration")
-            assert isinstance(configuration, dict)
+            if not isinstance(configuration, dict):
+                raise AuthorizationRejected("configuration payload is malformed")
             status = configuration.get("status")
             current = await _current_payload(db, principal, "configuration", configuration.get("id", entity_id))
             current_status = current.get("status") if isinstance(current, dict) else None
@@ -818,7 +819,8 @@ async def apply_ownership_plan(
         return
 
     if plan.entity_type == "project":
-        assert plan.customer_id is not None
+        if plan.customer_id is None:
+            raise AuthorizationRejected("Project ownership plan is missing customer_id")
         model = await db.get(CanonicalProject, (principal.organization_id, plan.entity_id))
         if model is None:
             model = CanonicalProject(
@@ -838,7 +840,8 @@ async def apply_ownership_plan(
         return
 
     if plan.entity_type == "project_sector":
-        assert plan.project_id is not None and plan.sector_id is not None
+        if plan.project_id is None or plan.sector_id is None:
+            raise AuthorizationRejected("ProjectSector ownership plan is missing project_id or sector_id")
         model = await db.get(CanonicalProjectSector, (principal.organization_id, plan.entity_id))
         if model is None:
             db.add(CanonicalProjectSector(
@@ -856,7 +859,8 @@ async def apply_ownership_plan(
         return
 
     if plan.entity_type == "item":
-        assert plan.project_id is not None and plan.project_sector_id is not None
+        if plan.project_id is None or plan.project_sector_id is None:
+            raise AuthorizationRejected("Item ownership plan is missing project_id or project_sector_id")
         model = await db.get(CanonicalItem, (principal.organization_id, plan.entity_id))
         if model is None:
             db.add(CanonicalItem(
@@ -877,7 +881,8 @@ async def apply_ownership_plan(
         return
 
     if plan.entity_type in PROJECT_CHILD_TYPES:
-        assert plan.project_id is not None
+        if plan.project_id is None:
+            raise AuthorizationRejected("Project-child ownership plan is missing project_id")
         model = await db.get(
             CanonicalProjectChild,
             (principal.organization_id, plan.entity_type, plan.entity_id),
@@ -901,7 +906,8 @@ async def apply_ownership_plan(
         return
 
     if plan.entity_type in ITEM_CHILD_TYPES:
-        assert plan.item_id is not None
+        if plan.item_id is None:
+            raise AuthorizationRejected("Item-child ownership plan is missing item_id")
         model = await db.get(
             CanonicalItemChild,
             (principal.organization_id, plan.entity_type, plan.entity_id),

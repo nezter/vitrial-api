@@ -79,7 +79,7 @@ def test_sync_push_limit_leaves_headroom_over_the_real_client():
     A limit set at the contract's raw payload budget would reject the app's own
     legitimate pushes, because base64 and JSON framing both add to the body.
     """
-    limit = limit_for_path("/api/v1/sync/v2/push")
+    limit = limit_for_path("/api/v2/sync/push")
     assert limit is not None
     # 200 records x 1.5 MB raw budget cannot co-occur; the client caps total payload
     # per batch at 1.5 MB, which is ~2.1 MB once base64 and framing are included.
@@ -101,7 +101,7 @@ def test_unlisted_paths_are_not_limited():
     on a path nobody has reasoned about, so unlisted paths are left alone deliberately.
     """
     assert limit_for_path("/health") is None
-    assert limit_for_path("/api/v1/sync/v2/pull") is None
+    assert limit_for_path("/api/v2/sync/pull") is None
 
 
 def test_longest_matching_prefix_wins():

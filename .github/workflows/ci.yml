@@ -18,9 +18,16 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install --upgrade pip
-      - run: pip install -e '.[dev]'
+      # Reproducible deps: install the pinned transitive closure from the lock, then the
+      # package itself with --no-deps so pyproject ranges never silently float in CI.
+      - run: pip install -r requirements-lock.txt
+      - run: pip install -e '.[dev]' --no-deps
+      # Consistency guard: the same lock must produce a self-consistent environment.
+      - run: pip check
       - run: python -m compileall -q app migrations tests scripts
       - run: python scripts/validate_backend_contract.py
+      - name: Guard-prefix lint (no declared guard maps to a dead route)
+        run: python scripts/check_guard_prefixes.py
       - run: python -m pytest -q
 
   postgres:
@@ -142,6 +149,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t vitrial-api:ci .
+
+  security:
+    name: Security (deps, secrets, image)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Secrets scan (gitleaks)
+        uses: zricethezav/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Dependency + filesystem vulnerability scan (trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: '.'
+          format: table
+          exit-code: '1'
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+      - name: Build image for scan
+        run: docker build -t vitrial-api:security .
+      - name: Container image scan (trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: vitrial-api:security
+          format: table
+          exit-code: '0'
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
 
   deployment:
     name: Acceptance deployment topology

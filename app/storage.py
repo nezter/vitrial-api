@@ -118,7 +118,7 @@ class LocalObjectStore(ObjectStore):
             raise FileNotFoundError(key)
         with path.open("rb") as handle:
             while True:
-                chunk = handle.read(1024 * 1024)
+                chunk = await asyncio.to_thread(handle.read, 1024 * 1024)
                 if not chunk:
                     break
                 yield chunk

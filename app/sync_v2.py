@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from typing import Literal
 
-from pydantic import Field, JsonValue, field_validator
+from pydantic import Field, JsonValue, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import Principal
@@ -12,6 +12,7 @@ from app.schemas import (
     EntityType,
     MAX_SYNC_IDENTIFIER_LENGTH,
     MAX_SYNC_RECORDS,
+    MAX_SYNC_V1_BATCH_PAYLOAD_BYTES,
     StrictModel,
     SyncBatch,
     SyncRecord,
@@ -57,6 +58,17 @@ class SyncBatchV2(StrictModel):
     deviceID: str = Field(min_length=1, max_length=MAX_SYNC_IDENTIFIER_LENGTH)
     cursor: str | None = Field(default=None, max_length=MAX_SYNC_IDENTIFIER_LENGTH)
     records: list[SyncRecordV2] = Field(default_factory=list, max_length=MAX_SYNC_RECORDS)
+
+    @model_validator(mode="after")
+    def aggregate_payload_must_be_bounded(self) -> "SyncBatchV2":
+        # Without this a batch of 200 legitimate 1.5 MB records is ~300 MB on the wire.
+        # Same aggregate budget as V1 so the ceiling is cross-protocol, not per-record math.
+        total = sum(len(_canonical_json_bytes(r.payload)) for r in self.records)
+        if total > MAX_SYNC_V1_BATCH_PAYLOAD_BYTES:
+            raise ValueError(
+                f"aggregate sync payload exceeds {MAX_SYNC_V1_BATCH_PAYLOAD_BYTES} bytes"
+            )
+        return self
 
 
 class SyncResultV2(StrictModel):

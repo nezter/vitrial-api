@@ -63,7 +63,6 @@ DEFAULT_WINDOW_SECONDS = 60.0
 # shared egress for one noisy device.
 THROTTLED_PATH_PREFIXES: tuple[str, ...] = (
     "/api/v1/auth/pair",
-    "/api/v1/auth/refresh",
 )
 
 # Never more than this many distinct keys retained, so the limiter's own memory is

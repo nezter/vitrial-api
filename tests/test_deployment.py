@@ -31,7 +31,7 @@ def production_values() -> dict[str, str]:
     return {
         "API_HOST": "api.vitrial.invalid",
         "API_IMAGE": "ghcr.io/vitrial/api@sha256:" + "a" * 64,
-        "CADDY_IMAGE": "caddy:2-alpine",
+        "CADDY_IMAGE": "caddy:2-alpine@sha256:" + "c" * 64,
         "SERVICE_VERSION": "0.2.0",
         "DATABASE_URL": "postgresql+asyncpg://vitrial:strong-db-secret@db.internal.invalid:5432/vitrial",
         "S3_ENDPOINT_URL": "https://objects.internal.invalid",

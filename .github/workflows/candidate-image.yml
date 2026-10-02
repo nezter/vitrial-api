@@ -3,8 +3,7 @@ name: Publish immutable candidate image
 on:
   push:
     branches:
-      - feature/SCRUM-21-remote-catalogs-v2
-      - feature/delivery-closeout-complete
+      - 'feature/**'
   workflow_dispatch:
 
 permissions:

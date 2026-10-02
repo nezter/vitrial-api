@@ -130,9 +130,10 @@ def test_forwarded_header_is_used_and_peers_are_fallback():
 
 def test_only_the_unauthenticated_auth_surface_is_throttled():
     assert path_is_throttled("/api/v1/auth/pair")
-    assert path_is_throttled("/api/v1/auth/refresh")
+    # The only throttled route is the pairing exchange; /api/v1/auth/refresh has no live route.
+    assert not path_is_throttled("/api/v1/auth/refresh")
     # Authenticated traffic is bounded by push serialization, not by client address.
-    assert not path_is_throttled("/api/v1/sync/v2/pull")
+    assert not path_is_throttled("/api/v2/sync/pull")
     assert not path_is_throttled("/health")
     # A prefix match must not be satisfiable by a longer unrelated path.
     assert not path_is_throttled("/api/v1/authentication/thing")
