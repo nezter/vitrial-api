@@ -13,8 +13,10 @@
 useDefault = true
 
 [allowlist]
-  description = "Deliberate dummy fixture credentials (test_deployment.py production_values())"
+  description = "Deliberate dummy fixture credentials (test_deployment.py production/acceptance values)"
   regexes = [
     '''access-key-1234567890''',
     '''secret-key-1234567890''',
+    '''acceptance-db-secret-12345''',
+    '''acceptance-secret-12345''',
   ]
