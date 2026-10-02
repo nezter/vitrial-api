@@ -1,0 +1,32 @@
+# Build artifacts and dependency sources.
+#
+# build_path / deps_path are redirected to the repository root (one level up) by
+# the umbrella root's mix.exs, so these are ignored here and the real ones are
+# ignored by the repository's root .gitignore. Both are listed so the tree is
+# correct no matter which directory mix is invoked from.
+_build/
+/_build
+deps/
+/deps
+doc/
+/doc
+cover/
+/cover
+/tmp
+/tmp/
+
+# Erlang/OTP build products
+*.beam
+*.plt
+*.plt.hash
+erl_crash.dump
+*.dump
+*.ez
+*.tar
+
+# Hex
+.hex/
+hex.lock.lock
+
+# Dialyzer PLTs are large and machine-specific
+/priv/plts
