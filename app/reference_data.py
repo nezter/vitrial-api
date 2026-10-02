@@ -471,12 +471,7 @@ async def get_publication(
     return _to_response(model)
 
 
-async def list_publications(
-    db: AsyncSession,
-    principal: Principal,
-    kind: PublicationKind | None = None,
-) -> ReferencePublicationListResponse:
-    await ensure_baseline_publications(db, principal)
+async def _list_publications(db: AsyncSession, principal: Principal, kind: PublicationKind | None) -> ReferencePublicationListResponse:
     query = select(ReferencePublication).where(
         ReferencePublication.organization_id == principal.organization_id
     )
@@ -492,6 +487,15 @@ async def list_publications(
         )
     ).all()
     return ReferencePublicationListResponse(publications=[_to_response(row) for row in rows])
+
+
+async def list_publications(
+    db: AsyncSession,
+    principal: Principal,
+    kind: PublicationKind | None = None,
+) -> ReferencePublicationListResponse:
+    await ensure_baseline_publications(db, principal)
+    return await _list_publications(db, principal, kind)
 
 
 async def current_publications(
