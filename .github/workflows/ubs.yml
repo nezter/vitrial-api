@@ -1,0 +1,67 @@
+# UBS rapid bug gate — the fast lane for bug detection on every Python-touching push.
+#
+# Runs the UBS meta-runner (ast-grep-based static bug scanner) over the Python
+# estate and fails on any NEW critical/warning finding versus the committed
+# baseline `ubs-baseline.json`. The baseline's residual findings are the
+# validated false-positive floor documented in trackers/vitrial-api-TRACKER.md
+# ("UBS loop status") — this lane is not a zero-findings vanity gate, it is a
+# regression tripwire: new bug classes fail in seconds, known FPs do not churn.
+#
+# Verdict mechanics live in scripts/ubs_gate.sh; the short version is that UBS
+# exit codes reflect CURRENT totals (baseline is reporting-only), so the gate
+# judges the JSON delta and treats environment failures (nothing scanned,
+# refused scan) as hard failures.
+#
+# Local run, same verdict as CI:  make ubs   (or  bash scripts/ubs_gate.sh)
+name: UBS bug gate
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "app/**"
+      - "scripts/**"
+      - "migrations/**"
+      - "tests/**"
+      - ".ubsignore"
+      - "ubs-baseline.json"
+      - ".github/workflows/ubs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ubs-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ubs:
+    name: ubs/ python bug gate (delta vs baseline)
+    runs-on: [self-hosted, beam-ci]
+    timeout-minutes: 5
+    env:
+      # Pinned module set on the runner = reproducible findings. Module
+      # auto-update between runs would make info-level counts drift (observed
+      # -182 on an unchanged tree), and info does not gate anyway.
+      UBS_NO_AUTO_UPDATE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tool probe (fail loudly if the runner loses ubs)
+        run: |
+          command -v ubs >/dev/null 2>&1 || [ -x /usr/local/bin/ubs ] || {
+            echo "ubs is not installed on this runner (expect /usr/local/bin/ubs + ~/.local/share/ubs/modules)"; exit 1;
+          }
+          ubs --version 2>/dev/null || /usr/local/bin/ubs --version
+
+      - name: Scan + delta verdict
+        run: bash scripts/ubs_gate.sh ubs-baseline.json
+
+      - name: Publish findings log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubs-findings
+          path: ubs-findings.txt
+          retention-days: 7

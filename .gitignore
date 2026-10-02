@@ -12,3 +12,6 @@ dist/
 build/
 *.egg-info/
 .DS_Store
+
+# UBS rapid bug gate: per-run artifact written by scripts/ubs_gate.sh
+ubs-findings.txt
