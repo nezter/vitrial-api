@@ -116,12 +116,14 @@ paths:
           schema:
             type: string
             minLength: 1
+            maxLength: 256
         - name: X-Vitrial-Filename
           in: header
           required: true
           schema:
             type: string
             minLength: 1
+            maxLength: 512
         - name: X-Content-SHA256
           in: header
           required: true

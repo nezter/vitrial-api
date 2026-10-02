@@ -254,8 +254,8 @@ async def evidence_head(
 async def evidence_put(
     documentID: DocumentID,
     request: Request,
-    x_vitrial_item_id: Annotated[str, Header(alias="X-Vitrial-Item-ID", min_length=1)],
-    x_vitrial_filename: Annotated[str, Header(alias="X-Vitrial-Filename", min_length=1)],
+    x_vitrial_item_id: Annotated[str, Header(alias="X-Vitrial-Item-ID", min_length=1, max_length=256)],
+    x_vitrial_filename: Annotated[str, Header(alias="X-Vitrial-Filename", min_length=1, max_length=512)],
     x_content_sha256: Annotated[
         str,
         Header(alias="X-Content-SHA256", pattern=r"^[0-9a-fA-F]{64}$"),
