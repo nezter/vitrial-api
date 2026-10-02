@@ -1,0 +1,20 @@
+# Extends gitleaks' default ruleset with this repository's allowlist.
+#
+# Without this file gitleaks runs the default config, and the default
+# generic-api-key rule flags the deliberately fake credentials in
+# tests/test_deployment.py ("secret-key-1234567890", entropy ~4.07). Those
+# strings are test fixtures exercising the deployment validator's
+# accept-and-do-not-echo path: every host in the fixture is under the
+# reserved .invalid TLD, so no value there can point at real
+# infrastructure. They are allowlisted by exact literal — not by file path,
+# which would silence any future real secret committed to the same file —
+# so the default rules stay at full strength everywhere else.
+[extend]
+useDefault = true
+
+[allowlist]
+  description = "Deliberate dummy fixture credentials (test_deployment.py production_values())"
+  regexes = [
+    '''access-key-1234567890''',
+    '''secret-key-1234567890''',
+  ]
